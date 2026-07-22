@@ -1,0 +1,4 @@
+{
+  "version": "1.28.0",
+  "note": "Ten plik podbijaj przy KAŻDYM wdrożeniu nowej wersji index.html — to on wywołuje baner \"Dostępna nowa wersja\" u wszystkich, którzy mają aplikację otwartą."
+}
