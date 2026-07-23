@@ -1222,7 +1222,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 // Wersja aplikacji — widoczna w stopce ekranu logowania. Podbijaj przy każdym
 // wdrożeniu: zespół od razu widzi, czy ma świeżą wersję, a nie starą z cache
 // przeglądarki (przy problemach: Ctrl+Shift+R odświeża z pominięciem cache).
-const APP_VERSION = '1.31.1';
+const APP_VERSION = '1.31.2';
 
 /* =========================================================================
    v1.7 — powiadomienie "dostępna nowa wersja". Zasada: publikujesz nową
@@ -4889,13 +4889,15 @@ function absenceOnDay(userId,dateStr){
 }
 // Data aktualności danych — pokazywana wszędzie, gdzie widać nieobecności.
 function kadryFreshnessHTML(){
-  // v1.31: pokazujemy nowszy z dwóch znaczników — ręcznego wgrania pliku
-  // (kadryImportTs) i automatycznej synchronizacji z arkusza (absencesSyncedAt).
+  // v1.31.2: rozróżniamy, SKĄD wzięły się dane. Synchronizacja ustawia oba
+  // znaczniki na tę samą chwilę (żeby starsze widoki też pokazywały świeżą
+  // datę), więc równość oznacza właśnie import automatyczny; sam kadryImportTs
+  // nowszy od synchronizacji = ktoś wgrał plik ręcznie później.
   const reczny=db.kadryImportTs||null, auto=db.absencesSyncedAt||null;
   let opis;
-  if(auto&&(!reczny||auto>reczny)) opis=' · synchronizacja z arkuszem urlopów: '+fmtTs(auto);
-  else if(reczny) opis=' · dane z arkusza urlopów (kier. Soczek): '+fmtTs(reczny);
-  else opis=' · brak importu z arkusza urlopów';
+  if(auto&&(!reczny||auto>=reczny)) opis=' · zsynchronizowano z arkuszem urlopów: '+fmtTs(auto);
+  else if(reczny) opis=' · wgrano ręcznie z arkusza urlopów: '+fmtTs(reczny);
+  else opis=' · brak danych z arkusza urlopów';
   return '<div style="font-size:10px;color:var(--text3);margin-top:6px">'+
     '📅 Stan na dziś: '+today()+esc(opis)+'</div>';
 }
@@ -7348,8 +7350,16 @@ function geoScopeMembers(){
 function geoAvatarBadge(mm){ const d=geoDeptDef(mm.dept); return '<span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:50%;background:'+d.color+';color:#fff;font-size:9px;font-weight:700;flex-shrink:0">'+esc(geoIni(mm.name))+'</span>'; }
 function geoDeptChip(dept){ const d=geoDeptDef(dept); return '<span class="pill" style="background:'+(isDarkMode()?d.dark:(d.color+'22'))+';color:'+(isDarkMode()?'#fff':d.color)+';border:1px solid '+d.color+';font-size:9px;font-weight:700">'+esc(geoDeptNick(dept))+'</span>'; }
 function geoFreshnessHTML(){
-  const ts=(db.geoTeam&&db.geoTeam.importTs)?fmtTs(db.geoTeam.importTs):null;
-  return '<div style="font-size:10px;color:var(--text3);margin-top:6px">📅 Stan na dziś: '+today()+(ts?(' · dane z arkusza urlopów (kier. Soczek): '+ts):' · brak importu — wgraj arkusz')+'</div>';
+  // v1.31.2: ten sam podział co w kadryFreshnessHTML — synchronizacja
+  // automatyczna vs. ręcznie wgrany plik.
+  const ts=(db.geoTeam&&db.geoTeam.importTs)?db.geoTeam.importTs:null;
+  const auto=db.absencesSyncedAt||null;
+  let opis;
+  if(!ts) opis=' · brak danych — pobierz z arkusza albo wgraj plik';
+  else if(auto&&auto>=ts) opis=' · zsynchronizowano z arkuszem urlopów: '+fmtTs(ts);
+  else opis=' · wgrano ręcznie z arkusza urlopów: '+fmtTs(ts);
+  return '<div style="font-size:10px;color:var(--text3);margin-top:6px">📅 Stan na dziś: '+today()+esc(opis)+
+    ((db.geoTeam&&db.geoTeam.kadrDate)?esc(' · stan KADR: '+db.geoTeam.kadrDate):'')+'</div>';
 }
 function geoAbsRowHTML(mm,a){
   if(!mm) return '';
