@@ -961,6 +961,55 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
   </div>
 </div>
 
+<!-- v1.30: co dalej z zatwierdzonym pomysłem. Wcześniej każdy zatwierdzony
+     pomysł lądował w kolejce jako pozycja bez kategorii, którą koordynator
+     musiał ręcznie uzupełniać — a pomysły dotyczące już istniejącego portalu
+     (np. „dodajcie warstwę X do Leśnego") i tak trzeba było potem przepisywać
+     ręcznie w uwagi tego portalu. Tutaj rozstrzyga się to od razu. -->
+<div id="modal-idea-approve" class="modal-bg">
+  <div class="modal" style="max-width:520px">
+    <h3>Wdrożenie pomysłu</h3>
+    <div id="ia-title" style="font-size:13px;font-weight:700;margin-bottom:2px"></div>
+    <div id="ia-meta" style="font-size:11px;color:var(--text3);margin-bottom:12px"></div>
+
+    <div class="field"><label>Co robimy z tym pomysłem?</label>
+      <select id="ia-mode" onchange="onIdeaApproveModeChange()">
+        <option value="new">Nowa kompozycja w katalogu (trafi na giełdę zadań)</option>
+        <option value="attach">Dołącz do istniejącego portalu jako uwaga</option>
+      </select>
+    </div>
+
+    <div id="ia-new-box">
+      <div class="field"><label>Geoportal / kategoria</label>
+        <select id="ia-category"></select>
+      </div>
+      <div class="field"><label>Nazwa kompozycji</label>
+        <input id="ia-compname" placeholder="np. Ścieżki edukacyjne w lesie">
+      </div>
+      <div class="field" style="margin-bottom:6px"><label>Termin (opcjonalnie)</label>
+        <input type="date" id="ia-deadline">
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:10px">Kompozycja dopisze się do katalogu, a zadanie trafi na giełdę jako gotowe do pobrania.</div>
+    </div>
+
+    <div id="ia-attach-box" style="display:none">
+      <div class="field"><label>Portal, do którego dopisujemy</label>
+        <select id="ia-portal"></select>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:10px">Treść pomysłu trafi jako uwaga do tego portalu, z podpisem autora.</div>
+    </div>
+
+    <div class="field"><label>Notatka dla zgłaszającego (opcjonalnie)</label>
+      <textarea id="ia-note" rows="2" placeholder="np. Dobry pomysł, robimy w tym kwartale"></textarea>
+    </div>
+
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="closeModal('modal-idea-approve')">Anuluj</button>
+      <button class="btn btn-primary" onclick="confirmIdeaApprove()">Zatwierdź i wdróż</button>
+    </div>
+  </div>
+</div>
+
 <div id="modal-add-user" class="modal-bg">
   <div class="modal" style="max-width:440px">
     <h3 id="au-title">Dodaj użytkownika</h3>
@@ -1173,7 +1222,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 // Wersja aplikacji — widoczna w stopce ekranu logowania. Podbijaj przy każdym
 // wdrożeniu: zespół od razu widzi, czy ma świeżą wersję, a nie starą z cache
 // przeglądarki (przy problemach: Ctrl+Shift+R odświeża z pominięciem cache).
-const APP_VERSION = '1.29.0';
+const APP_VERSION = '1.31.1';
 
 /* =========================================================================
    v1.7 — powiadomienie "dostępna nowa wersja". Zasada: publikujesz nową
@@ -4840,9 +4889,65 @@ function absenceOnDay(userId,dateStr){
 }
 // Data aktualności danych — pokazywana wszędzie, gdzie widać nieobecności.
 function kadryFreshnessHTML(){
-  const imp=db.kadryImportTs?fmtTs(db.kadryImportTs):null;
+  // v1.31: pokazujemy nowszy z dwóch znaczników — ręcznego wgrania pliku
+  // (kadryImportTs) i automatycznej synchronizacji z arkusza (absencesSyncedAt).
+  const reczny=db.kadryImportTs||null, auto=db.absencesSyncedAt||null;
+  let opis;
+  if(auto&&(!reczny||auto>reczny)) opis=' · synchronizacja z arkuszem urlopów: '+fmtTs(auto);
+  else if(reczny) opis=' · dane z arkusza urlopów (kier. Soczek): '+fmtTs(reczny);
+  else opis=' · brak importu z arkusza urlopów';
   return '<div style="font-size:10px;color:var(--text3);margin-top:6px">'+
-    '📅 Stan na dziś: '+today()+(imp?' · dane z arkusza urlopów (kier. Soczek): '+imp:' · brak importu z arkusza urlopów')+'</div>';
+    '📅 Stan na dziś: '+today()+esc(opis)+'</div>';
+}
+
+/* -------------------------------------------------------------------------
+   v1.31 — RĘCZNE POBRANIE NIEOBECNOŚCI Z ARKUSZA.
+   Automat i tak chodzi kilka razy dziennie (5:45, 10:00, 12:00, 16:00), ale
+   gdy ktoś właśnie wpisał urlop i chce go od razu zobaczyć w aplikacji, nie ma
+   sensu kazać mu czekać do następnej godziny.
+   ------------------------------------------------------------------------- */
+function importAbsencesButtonHTML(){
+  // v1.31.1: dostępne także dla kierowników. Ta sama reguła co przy ręcznym
+  // wgrywaniu pliku (canImportGeo) — kto może wgrać arkusz, ten może też kazać
+  // aplikacji pobrać go samodzielnie. Dyrektor pozostaje wyłączony, bo ma
+  // wyłącznie wgląd.
+  if(!canImportGeo()) return '';
+  return '<div style="margin-top:8px">'+
+    '<button class="btn btn-sm" id="abs-sync-btn" onclick="importAbsencesNow()">🔄 Pobierz dane z arkusza urlopów teraz</button>'+
+    '<span id="abs-sync-msg" style="font-size:11px;color:var(--text3);margin-left:8px"></span>'+
+  '</div>';
+}
+async function importAbsencesNow(){
+  const btn=document.getElementById('abs-sync-btn');
+  const msg=document.getElementById('abs-sync-msg');
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Pobieram z arkusza...'; }
+  if(msg) msg.textContent='';
+  const r=await apiPost(withToken({action:'import_absences'}),WRITE_TIMEOUT_MS);
+  if(btn){ btn.disabled=false; btn.textContent='🔄 Pobierz dane z arkusza urlopów teraz'; }
+
+  if(r&&r.ok){
+    // Serwer zapisał bazę po swojemu — dociągamy świeży stan, zamiast zgadywać.
+    await refreshDBSafely({confirmOnShrink:false});
+    const czesci=[];
+    if(r.wpisow!=null) czesci.push('zespół PSIP: '+r.wpisow);
+    if(r.geoWpisow!=null) czesci.push('Zespół Geoinformacyjny: '+r.geoWpisow);
+    toast('✅ Zaimportowano nieobecności'+(czesci.length?' — '+czesci.join(', '):''));
+    // Zmiany osobowe w arkuszu to rzecz, o której koordynator MUSI wiedzieć —
+    // nowa osoba bez przypisanego działu nie pojawi się na tablicy zespołu.
+    if((r.nowePosoby&&r.nowePosoby.length)||(r.brakujacePosoby&&r.brakujacePosoby.length)){
+      const info=[];
+      if(r.nowePosoby&&r.nowePosoby.length) info.push('Nowe osoby w arkuszu (przypisz im dział w Konfiguracji): '+r.nowePosoby.join(', '));
+      if(r.brakujacePosoby&&r.brakujacePosoby.length) info.push('Brak w arkuszu (jeśli odeszły — usuń ze składu): '+r.brakujacePosoby.join(', '));
+      if(msg){ msg.style.color='var(--warning-text)'; msg.textContent=info.join(' · '); }
+    }
+    renderCurrentViewSafely();
+    return;
+  }
+  if(isAuthError(r)){ handleAuthLost(); return; }
+  const tekst=(r&&r.message)?r.message:
+    (r&&r.error==='network'?'Brak połączenia z serwerem.':'Nie udało się pobrać danych z arkusza.');
+  if(msg){ msg.style.color='var(--danger-text)'; msg.textContent=tekst; }
+  toast('❌ '+tekst);
 }
 // Status osoby DZIŚ na podstawie modułu nieobecności.
 function todayStatusOf(userId){
@@ -6672,7 +6777,8 @@ function renderAbsences(){
   const todayStr=today();
   let html=backButton()+'<h2 style="font-size:18px;font-weight:700;margin-bottom:6px">🗓️ Nieobecności</h2>'+
     '<div style="font-size:12px;color:var(--text3);margin-bottom:4px">Urlopy, L4, opieka, praca zdalna i delegacje zespołu. Gdy termin portalu wypadnie w trakcie czyjejś nieobecności, aplikacja ostrzeże przy tym portalu i w harmonogramie.</div>'+
-    kadryFreshnessHTML();
+    kadryFreshnessHTML()+
+    importAbsencesButtonHTML(); // v1.31: ręczne pobranie, bez czekania na automat
   // v1.25: odnośnik do arkusza urlopów kier. Soczka (dla wszystkich, którzy widzą zakładkę).
   html+=urlopSheetLinkCardHTML();
   // v1.25: RĘCZNE dodawanie nieobecności — TYLKO administrator (koordynator).
@@ -7332,6 +7438,13 @@ function renderGeoTeam(){
   if(canImportGeo()){
     html+='<div class="card"><div class="section-hdr" style="margin-top:0">📥 Import z arkusza urlopów</div>'+
       '<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Wgraj plik .xlsx (zakładka „'+URLOP_SHEET_NAME+'") — zaktualizuje nieobecności całego zespołu i zgłosi ewentualne zmiany osobowe.</div>'+
+      // v1.31.1: pobranie wprost z arkusza — bez pobierania i wgrywania pliku.
+      // Ręczne wgrywanie zostaje jako droga awaryjna (gdyby link przestał działać).
+      '<div style="margin-bottom:10px">'+
+        '<button class="btn btn-primary btn-sm" id="abs-sync-btn" onclick="importAbsencesNow()">🔄 Pobierz dane z arkusza urlopów teraz</button>'+
+        '<span id="abs-sync-msg" style="font-size:11px;color:var(--text3);margin-left:8px"></span>'+
+      '</div>'+
+      '<div style="font-size:11px;color:var(--text3);margin-bottom:4px">Albo wgraj plik ręcznie:</div>'+
       '<input type="file" accept=".xlsx" onchange="importGeoXlsx(this)">'+
       '<div id="geo-import-msg" style="font-size:12px;margin-top:6px"></div>'+
       geoFreshnessHTML()+
@@ -9568,25 +9681,114 @@ function deleteIdea(ideaId, ideaName){
   toast('✅ Pomysł usunięty');
 }
 
-async function approveIdea(iid){
-  const idea=(db.ideas||[]).find(function(x){return x.id===iid;});if(!idea)return;
-  const note=prompt('Opcjonalna notatka dla zgłaszającego (lub zostaw puste):');
-  idea.status='approved';idea.koordNote=note||'';
-  if(!db.queue)db.queue=[];
-  const authorName=(getUsers()[idea.author]||{}).name||idea.author;
-  const newQid=uid();
-  db.queue.push({id:newQid,name:idea.name,group:'',description:idea.description,
-    note:'Pomysł od: '+authorName,
-    date:today(),requestedBy:idea.author,status:'approved',deadline:''});
-  logAction('idea_approve','Zatwierdzono pomysł „'+idea.name+'” (od: '+authorName+') i dodano do kolejki');
+/* =========================================================================
+   v1.30 — ZATWIERDZANIE POMYSŁU Z OD RAZU PODJĘTĄ DECYZJĄ, CO DALEJ.
+   Dotąd każdy zatwierdzony pomysł lądował w kolejce jako pozycja BEZ kategorii
+   i trzeba ją było doklikiwać osobno. A pomysły dotyczące już istniejącego
+   portalu w ogóle nie miały swojej ścieżki — trzeba było je ręcznie przepisać
+   w uwagi tamtego portalu i skasować z kolejki.
+   ========================================================================= */
+let ideaApproveId=null;
+function approveIdea(iid){
+  const idea=(db.ideas||[]).find(function(x){return x.id===iid;});
+  if(!idea)return;
+  ideaApproveId=iid;
+  const users=getUsers();
+  const autor=(users[idea.author]||{}).name||idea.author;
+  document.getElementById('ia-title').textContent=idea.name;
+  document.getElementById('ia-meta').textContent='Zgłosił(a): '+autor+' · '+(idea.date||'');
+
+  // kategorie z katalogu
+  const kat=Object.keys(getCatalog()).sort(function(a,b){return a.localeCompare(b,'pl');});
+  document.getElementById('ia-category').innerHTML=
+    kat.map(function(k){return '<option value="'+esc(k)+'">'+esc(k)+'</option>';}).join('');
+
+  // istniejące portale — najpierw nieukończone, bo do nich najczęściej się dopisuje
+  const portale=db.portals.slice().sort(function(a,b){
+    const pa=portalPct(a)===100, pb=portalPct(b)===100;
+    if(pa!==pb) return pa?1:-1;
+    return String(a.name).localeCompare(String(b.name),'pl');
+  });
+  document.getElementById('ia-portal').innerHTML=portale.length
+    ? portale.map(function(p){
+        return '<option value="'+p.id+'">'+esc(p.name)+' — '+esc(p.group||'')+' ('+portalPct(p)+'%)</option>';
+      }).join('')
+    : '<option value="">— brak portali —</option>';
+
+  // domyślnie: nazwa kompozycji = nazwa pomysłu
+  document.getElementById('ia-compname').value=idea.name||'';
+  document.getElementById('ia-deadline').value='';
+  document.getElementById('ia-note').value='';
+  document.getElementById('ia-mode').value='new';
+  onIdeaApproveModeChange();
+  openModal('modal-idea-approve');
+}
+function onIdeaApproveModeChange(){
+  const tryb=document.getElementById('ia-mode').value;
+  document.getElementById('ia-new-box').style.display=(tryb==='new')?'':'none';
+  document.getElementById('ia-attach-box').style.display=(tryb==='attach')?'':'none';
+}
+
+async function confirmIdeaApprove(){
+  const idea=(db.ideas||[]).find(function(x){return x.id===ideaApproveId;});
+  if(!idea){ closeModal('modal-idea-approve'); return; }
+  const tryb=document.getElementById('ia-mode').value;
+  const note=document.getElementById('ia-note').value.trim();
+  const autor=(getUsers()[idea.author]||{}).name||idea.author;
+
+  if(tryb==='new'){
+    const kategoria=document.getElementById('ia-category').value;
+    const nazwa=document.getElementById('ia-compname').value.trim();
+    const termin=document.getElementById('ia-deadline').value;
+    if(!kategoria){ toast('Wybierz geoportal/kategorię.'); return; }
+    if(!nazwa){ toast('Podaj nazwę kompozycji.'); return; }
+
+    const katalog=getCatalog();
+    if(!Array.isArray(katalog[kategoria])) katalog[kategoria]=[];
+    if(katalog[kategoria].indexOf(nazwa)===-1) katalog[kategoria].push(nazwa);
+    else toast('Taka kompozycja już była w katalogu — dopisuję samo zadanie.');
+
+    if(!db.queue)db.queue=[];
+    db.queue.push({id:uid(),name:nazwa,group:kategoria,description:idea.description||'',
+      note:'💡 Wdrożenie pomysłu od: '+autor,
+      date:today(),requestedBy:idea.author,status:'approved',deadline:termin||''});
+
+    idea.status='approved';
+    idea.koordNote=note;
+    idea.wdrozenie={typ:'new',kategoria:kategoria,nazwa:nazwa};
+    logAction('idea_approve','Zatwierdzono pomysł „'+idea.name+'” (od: '+autor+') → nowa kompozycja „'+nazwa+'” w „'+kategoria+'”');
+    pushNotification(idea.author,'idea_approved',
+      '✅ Twój pomysł „'+idea.name+'” został zatwierdzony — trafił do katalogu jako „'+nazwa+'” ('+kategoria+') i czeka na giełdzie.',null,null);
+    saveDB();
+    updateQueueBadge();
+    closeModal('modal-idea-approve');
+    navTo('queue');
+    toast('Pomysł wdrożony — kompozycja w katalogu, zadanie na giełdzie.');
+    return;
+  }
+
+  // --- dołączenie do istniejącego portalu ---
+  const pid=document.getElementById('ia-portal').value;
+  const p=db.portals.find(function(x){return x.id===pid;});
+  if(!p){ toast('Wybierz portal.'); return; }
+  const tresc='💡 Wdrożenie pomysłu od: '+autor+' — '+idea.name+(idea.description?'. '+idea.description:'');
+  addPortalRemarkTo(p,tresc);
+
+  idea.status='approved';
+  idea.koordNote=note;
+  idea.wdrozenie={typ:'attach',portalId:p.id,portalName:p.name};
+  logAction('idea_approve','Zatwierdzono pomysł „'+idea.name+'” (od: '+autor+') → dopisano do portalu „'+p.name+'”');
+  pushNotification(idea.author,'idea_approved',
+    '✅ Twój pomysł „'+idea.name+'” został zatwierdzony — dopisany do portalu „'+p.name+'”.',p.id,null);
+  // Właściciel portalu też powinien wiedzieć, że coś mu doszło do zakresu.
+  if(p.currentOwner&&p.currentOwner!==cu){
+    pushNotification(p.currentOwner,'portal_remark',
+      '💡 Do portalu „'+p.name+'” doszła uwaga z pomysłu '+autor+'.',p.id,null);
+  }
   saveDB();
-  updateQueueBadge();
-  // Zatwierdzony pomysł ląduje w kolejce, ale od razu otwieramy edycję tej
-  // pozycji, żeby koordynator mógł łatwo uzupełnić kategorię/termin zanim
-  // trafi do pracowników jako w pełni gotowa pozycja.
-  navTo('queue');
-  editQueueItem(newQid);
-  toast('Pomysł zatwierdzony i dodany do kolejki — uzupełnij kategorię.');
+  closeModal('modal-idea-approve');
+  navTo('ideas');
+  toast('Pomysł dopisany do portalu „'+p.name+'”.');
 }
 async function rejectIdea(iid){
   const idea=(db.ideas||[]).find(function(x){return x.id===iid;});if(!idea)return;
