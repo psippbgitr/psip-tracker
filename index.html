@@ -1230,7 +1230,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 // Wersja aplikacji — widoczna w stopce ekranu logowania. Podbijaj przy każdym
 // wdrożeniu: zespół od razu widzi, czy ma świeżą wersję, a nie starą z cache
 // przeglądarki (przy problemach: Ctrl+Shift+R odświeża z pominięciem cache).
-const APP_VERSION = '1.32.0';
+const APP_VERSION = '1.33.0';
 
 /* =========================================================================
    v1.7 — powiadomienie "dostępna nowa wersja". Zasada: publikujesz nową
@@ -7792,6 +7792,40 @@ function updateAssignAbsenceWarn(){
 const GANTT_DAY_W=14;            // szerokość jednego dnia w px
 let ganttMode='portale';         // 'portale' | 'osoby'
 let ganttOverThreshold=4;        // ile portali w tygodniu = przeciążenie
+/* =========================================================================
+   v1.33 — HARMONOGRAM HIERARCHICZNY.
+
+   Poprzednia wersja była płaską listą WSZYSTKICH portali naraz. Przy
+   kilkudziesięciu tematach, z których każdy ma 6 etapów, dawało to ścianę
+   pasków, z której nie dało się nic wyczytać ani zaplanować.
+
+   Teraz harmonogram rozwija się stopniowo:
+     poziom 1 — geoportal (kategoria): jeden pasek obejmujący całą grupę,
+     poziom 2 — kompozycje: pasek portalu podzielony na segmenty etapów,
+     poziom 3 — etapy: własne daty każdego z sześciu etapów.
+   Domyślnie widać sam poziom 1, więc ekran startowy to kilkanaście wierszy
+   zamiast kilkuset.
+   ========================================================================= */
+let ganttZoom='q';               // 'month' | 'q' | 'half' | 'all'
+let ganttOpen={};                // rozwinięte węzły: 'g:Nazwa' / 'p:id'
+function ganttToggleNode(key){
+  ganttOpen[key]=!ganttOpen[key];
+  if(curView==='gantt') document.getElementById('main-content').innerHTML=renderGantt();
+}
+function setGanttZoom(z){
+  ganttZoom=z;
+  if(curView==='gantt') document.getElementById('main-content').innerHTML=renderGantt();
+}
+function ganttRozwinWszystko(czy){
+  ganttOpen={};
+  if(czy){
+    const grupy={};
+    db.portals.forEach(function(p){ if(portalGanttWindow(p)) grupy[p.group||'—']=true; });
+    Object.keys(grupy).forEach(function(g){ ganttOpen['g:'+g]=true; });
+  }
+  if(curView==='gantt') document.getElementById('main-content').innerHTML=renderGantt();
+}
+
 function portalGanttWindow(p){
   const end=p.deadline||null;
   if(!end) return null;
@@ -7799,18 +7833,69 @@ function portalGanttWindow(p){
   if(start>end) start=end;
   return {start:start,end:end};
 }
+
+// Zakres osi czasu. Zoom ogranicza okno do wybranego wycinka od dziś —
+// przy „całości" pokazujemy wszystko, ale z twardym limitem, żeby oś nie
+// urosła do kilku tysięcy pikseli.
 function ganttRange(){
   const wins=db.portals.map(portalGanttWindow).filter(Boolean);
   if(!wins.length) return null;
+  const t=today();
+  if(ganttZoom!=='all'){
+    const dni={month:31,q:92,half:183}[ganttZoom]||92;
+    const startMon=mondayOfStr(t);
+    return {start:startMon,end:addDaysStr(startMon,dni-1),days:dni};
+  }
   let min=wins[0].start,max=wins[0].end;
   wins.forEach(function(w){ if(w.start<min)min=w.start; if(w.end>max)max=w.end; });
-  const t=today(); if(t<min)min=t;
+  if(t<min)min=t;
   const startMon=mondayOfStr(min);
   let end=addDaysStr(max,7);
   let days=daysBetweenStr(startMon,end)+1;
   const CAP=280;
   if(days>CAP){ days=CAP; end=addDaysStr(startMon,CAP-1); }
   return {start:startMon,end:end,days:days};
+}
+
+// --- geometria etapów ------------------------------------------------------
+// Zakres jednego etapu. Najpierw próbujemy RZECZYWISTYCH dat (nowe/wip →
+// done); gdy etap ich jeszcze nie ma, dostaje proporcjonalny wycinek okna
+// portalu — dzięki temu pasek zawsze coś pokazuje, także dla portali dopiero
+// zaplanowanych.
+function ganttStageSpan(p,s,idx,total){
+  const w=portalGanttWindow(p); if(!w) return null;
+  const d=s.dates||{};
+  const start=d.nowe||d.wip||null;
+  const end=d.done||null;
+  if(start&&end&&end>=start) return {start:start,end:end,realne:true};
+  if(start&&!end){
+    // etap w toku — ciągnie się do dziś albo do terminu portalu, jeśli minął
+    const koniec=today()>start?today():start;
+    return {start:start,end:(koniec>w.end?w.end:koniec),realne:true};
+  }
+  // proporcjonalny wycinek
+  const dlugosc=Math.max(1,daysBetweenStr(w.start,w.end)+1);
+  const na=Math.max(1,Math.floor(dlugosc/Math.max(1,total)));
+  const od=addDaysStr(w.start,idx*na);
+  let doD=addDaysStr(w.start,Math.min(dlugosc-1,(idx+1)*na-1));
+  if(doD<od) doD=od;
+  return {start:od,end:doD,realne:false};
+}
+function ganttStageColor(s){
+  if(s.status==='done') return 'var(--success)';
+  if(s.status==='problem') return 'var(--danger)';
+  if(s.status==='wip') return 'var(--warning)';
+  if(s.status==='nowe') return 'var(--accent)';
+  return 'var(--border2)';
+}
+// Wycinek [start,end] przycięty do widocznego okna; null gdy poza zakresem.
+function ganttClip(range,start,end){
+  if(end<range.start||start>range.end) return null;
+  const s=start<range.start?range.start:start;
+  const e=end>range.end?range.end:end;
+  const left=daysBetweenStr(range.start,s)*GANTT_DAY_W;
+  const width=Math.max(GANTT_DAY_W*0.6,(daysBetweenStr(s,e)+1)*GANTT_DAY_W);
+  return {left:left,width:width};
 }
 function overbookedWeeks(threshold){
   threshold=threshold||ganttOverThreshold;
@@ -7828,22 +7913,94 @@ function overbookedWeeks(threshold){
   return Object.keys(byUserWeek).map(function(k){return byUserWeek[k];}).filter(function(x){return x.ids.length>=threshold;});
 }
 function setGanttMode(m){ ganttMode=m; if(curView==='gantt') document.getElementById('main-content').innerHTML=renderGantt(); }
+// POZIOM 2 — pasek portalu podzielony na segmenty etapów. Kolor segmentu =
+// status etapu, więc z jednego spojrzenia widać, gdzie praca stoi, a nie tylko
+// jeden uśredniony procent.
 function ganttBarHTML(p,range,role){
   const w=portalGanttWindow(p); if(!w)return '';
-  const off=Math.max(0,daysBetweenStr(range.start,w.start));
-  const len=Math.max(1,daysBetweenStr(w.start,w.end)+1);
-  const left=off*GANTT_DAY_W, width=len*GANTT_DAY_W;
+  const poz=ganttClip(range,w.start,w.end); if(!poz) return '';
   const pct=portalPct(p);
-  const barColor=p.atRisk?'#E24B4A':(pct>=70?'#1baf7a':pct>=30?'#eda100':'#7c9cc4');
-  const canDrag=role==='koord';
-  return '<div id="gbar-'+p.id+'" class="gantt-bar" data-left="'+left+'" data-width="'+width+'" '+
-      'style="left:'+left+'px;width:'+width+'px;background:'+barColor+'" '+
-      'title="'+esc(p.name)+' — '+w.start+' → '+w.end+' ('+pct+'%)" '+
+  const canDrag=(role==='koord');
+  const users=getUsers(), m=users[p.currentOwner];
+  const etapy=p.stages||[];
+
+  // segmenty proporcjonalne do liczby etapów, w obrębie paska portalu
+  let segmenty='';
+  if(etapy.length){
+    const szer=100/etapy.length;
+    etapy.forEach(function(s,i){
+      segmenty+='<div style="position:absolute;left:'+(i*szer)+'%;width:'+szer+'%;top:0;bottom:0;'+
+        'background:'+ganttStageColor(s)+';'+(i?'border-left:1px solid rgba(255,255,255,.55);':'')+'" '+
+        'title="'+esc(s.name)+' — '+(STATE_LABEL[s.status]||s.status)+'"></div>';
+    });
+  }
+  const etykieta=esc(p.name)+' ['+pct+'%]';
+  const zmiescSie=poz.width>Math.max(90,etykieta.length*6.4);
+
+  return '<div id="gbar-'+p.id+'" class="gantt-bar" data-left="'+poz.left+'" data-width="'+poz.width+'" '+
+      'style="left:'+poz.left+'px;width:'+poz.width+'px;background:var(--surface2);overflow:visible;'+
+      (p.atRisk?'box-shadow:0 0 0 2px var(--danger);':'')+'" '+
+      'title="'+esc(p.name)+' — '+w.start+' → '+w.end+' ('+pct+'%)'+(m?' · '+esc(m.name):'')+'" '+
       'onclick="openPortal(\''+p.id+'\')">'+
+    '<div style="position:absolute;inset:0;border-radius:inherit;overflow:hidden">'+segmenty+'</div>'+
     (canDrag?'<span class="gantt-handle gh-left" onpointerdown="ganttHandleDown(event,\''+p.id+'\',\'start\')"></span>':'')+
-    '<span class="gantt-bar-label">'+esc(p.name)+'</span>'+
+    (zmiescSie
+      ? '<span class="gantt-bar-label" style="position:relative;z-index:2;text-shadow:0 1px 2px rgba(0,0,0,.5)">'+etykieta+'</span>'
+      : '<span style="position:absolute;left:'+(poz.width+6)+'px;top:50%;transform:translateY(-50%);white-space:nowrap;'+
+        'font-size:10.5px;font-weight:600;color:var(--text2);z-index:2">'+etykieta+'</span>')+
     (canDrag?'<span class="gantt-handle gh-right" onpointerdown="ganttHandleDown(event,\''+p.id+'\',\'end\')"></span>':'')+
   '</div>';
+}
+
+// POZIOM 1 — jeden pasek na cały geoportal: od najwcześniejszego startu do
+// najpóźniejszego terminu w grupie. Wypełnienie pokazuje średni postęp grupy.
+function ganttGroupBarHTML(portale,range){
+  let min=null,max=null,suma=0;
+  portale.forEach(function(p){
+    const w=portalGanttWindow(p); if(!w)return;
+    if(!min||w.start<min)min=w.start;
+    if(!max||w.end>max)max=w.end;
+    suma+=portalPct(p);
+  });
+  if(!min||!max) return '';
+  const poz=ganttClip(range,min,max); if(!poz) return '';
+  const sr=Math.round(suma/Math.max(1,portale.length));
+  return '<div style="position:absolute;left:'+poz.left+'px;width:'+poz.width+'px;top:6px;height:14px;'+
+      'background:var(--border);border-radius:7px;overflow:hidden" '+
+      'title="'+portale.length+' kompozycji · '+min+' → '+max+' · średni postęp '+sr+'%">'+
+    '<div style="height:100%;width:'+sr+'%;background:'+(sr>=70?'var(--success)':sr>=30?'var(--warning)':'var(--accent)')+';opacity:.75"></div>'+
+  '</div>';
+}
+
+// POZIOM 3 — osobny wiersz na każdy etap, z jego własnymi datami.
+function ganttStageRowsHTML(p,range,role){
+  const etapy=p.stages||[];
+  const canDrag=(role==='koord');
+  return etapy.map(function(s,i){
+    const sp=ganttStageSpan(p,s,i,etapy.length);
+    let pasek='';
+    if(sp){
+      const poz=ganttClip(range,sp.start,sp.end);
+      if(poz){
+        pasek='<div id="gst-'+p.id+'-'+s.id+'" data-left="'+poz.left+'" data-width="'+poz.width+'" '+
+          'style="position:absolute;left:'+poz.left+'px;width:'+poz.width+'px;top:5px;height:13px;border-radius:6px;'+
+          'background:'+ganttStageColor(s)+';'+(sp.realne?'':'opacity:.45;border:1px dashed var(--border2);')+
+          (canDrag?'cursor:ew-resize;':'')+'" '+
+          'title="'+esc(s.name)+' — '+sp.start+' → '+sp.end+(sp.realne?'':' (plan orientacyjny — etap nie ma jeszcze dat)')+'">'+
+          (canDrag&&sp.realne
+            ? '<span onpointerdown="ganttStageDown(event,\''+p.id+'\',\''+s.id+'\')" '+
+              'style="position:absolute;right:-3px;top:-2px;width:10px;height:17px;cursor:ew-resize"></span>'
+            : '')+
+        '</div>';
+      }
+    }
+    return '<div style="display:flex;align-items:center;background:var(--surface2)">'+
+      '<div style="width:'+GANTT_LABEL_W+'px;flex-shrink:0;padding-left:34px;padding-right:8px;font-size:10.5px;'+
+        'color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+
+        (i+1)+'. '+esc(s.name)+'</div>'+
+      '<div class="gantt-track" style="width:'+(range.days*GANTT_DAY_W)+'px;height:23px">'+pasek+'</div>'+
+    '</div>';
+  }).join('');
 }
 function ganttWeekHeaderHTML(range){
   let cells='';
@@ -7876,13 +8033,28 @@ function renderGantt(){
   const range=ganttRange();
   let html=backButton()+'<h2 style="font-size:18px;font-weight:700;margin-bottom:6px">📊 Harmonogram (Gantt)</h2>'+
     '<div style="font-size:12px;color:var(--text3);margin-bottom:10px">'+
-      (role==='koord'?'Przeciągnij krawędzie paska, aby zmienić planowany start (lewa) lub termin (prawa). ':'Podgląd harmonogramu. ')+
-      'Widok „Osoby" pokazuje obciążenie i przeciążenia w tygodniu.</div>'+
-    '<div style="display:flex;gap:6px;margin-bottom:12px;align-items:center;flex-wrap:wrap">'+
+      'Kliknij geoportal, aby rozwinąć jego kompozycje, a strzałkę przy kompozycji — aby zobaczyć jej etapy. '+
+      (role==='koord'
+        ? 'Krawędzie pasków przeciągasz: portal zmienia start (lewa) i termin (prawa), a wydłużenie etapu przesuwa kolejne o tyle samo dni.'
+        : 'Podgląd harmonogramu.')+'</div>'+
+    '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">'+
       '<div class="tab-row" style="margin:0">'+
-        '<div class="tab '+(ganttMode==='portale'?'on':'')+'" onclick="setGanttMode(\'portale\')">Portale</div>'+
-        '<div class="tab '+(ganttMode==='osoby'?'on':'')+'" onclick="setGanttMode(\'osoby\')">Osoby (obciążenie)</div>'+
+        '<div class="tab '+(ganttMode==='portale'?'on':'')+'" onclick="setGanttMode(\'portale\')">🗂️ Widok projektowy</div>'+
+        '<div class="tab '+(ganttMode==='osoby'?'on':'')+'" onclick="setGanttMode(\'osoby\')">👥 Obciążenie zespołu</div>'+
       '</div>'+
+      '<div style="flex:1"></div>'+
+      // v1.33: skoki osi czasu — bez nich przy widoku „całość" trzeba było
+      // przewijać kilkaset pikseli, żeby dojść do bieżącego tygodnia.
+      '<div style="display:flex;gap:0;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">'+
+        [['month','Miesiąc'],['q','3 miesiące'],['half','Półrocze'],['all','Całość']].map(function(z){
+          return '<button class="btn btn-xs" style="border:none;border-radius:0;'+
+            (ganttZoom===z[0]?'background:var(--accent);color:#fff':'')+'" onclick="setGanttZoom(\''+z[0]+'\')">'+z[1]+'</button>';
+        }).join('')+
+      '</div>'+
+      (ganttMode==='portale'
+        ? '<button class="btn btn-xs" onclick="ganttRozwinWszystko(true)">Rozwiń geoportale</button>'+
+          '<button class="btn btn-xs" onclick="ganttRozwinWszystko(false)">Zwiń wszystko</button>'
+        : '')+
     '</div>';
   if(!range){ return html+'<div class="card empty">Brak portali z terminem — dodaj terminy, aby zobaczyć harmonogram.</div>'; }
 
@@ -7920,18 +8092,55 @@ function renderGantt(){
     return html;
   }
 
-  // tryb "portale"
-  const list=db.portals.filter(function(p){return portalGanttWindow(p);})
-    .sort(function(a,b){return portalGanttWindow(a).end<portalGanttWindow(b).end?-1:1;});
+  // --- tryb „portale": hierarchia geoportal → kompozycja → etapy ---
+  const users=getUsers();
+  const lista=db.portals.filter(function(p){return portalGanttWindow(p);});
+  const grupy={};
+  lista.forEach(function(p){ const g=p.group||'— bez geoportalu —'; (grupy[g]=grupy[g]||[]).push(p); });
+  const nazwyGrup=Object.keys(grupy).sort(function(a,b){return String(a).localeCompare(String(b),'pl');});
+
   html+='<div class="card" style="overflow-x:auto;padding:10px 1.25rem"><div style="min-width:'+(GANTT_LABEL_W+range.days*GANTT_DAY_W)+'px">'+
     '<div style="display:flex"><div style="width:'+GANTT_LABEL_W+'px;flex-shrink:0"></div><div style="position:relative;flex-shrink:0">'+ganttWeekHeaderHTML(range)+'</div></div>';
-  const users=getUsers();
-  list.forEach(function(p){
-    const m=users[p.currentOwner];
-    html+='<div style="display:flex;align-items:center;border-top:1px solid var(--border)">'+
-      '<div style="width:'+GANTT_LABEL_W+'px;flex-shrink:0;padding-right:8px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="openPortal(\''+p.id+'\')" title="'+esc(p.name)+'"><span style="font-weight:600">'+esc(p.name)+'</span> <span style="color:var(--text3)">· '+(m?esc(m.ini):'—')+'</span></div>'+
-      '<div class="gantt-track" style="width:'+(range.days*GANTT_DAY_W)+'px;height:26px">'+ganttTodayLineHTML(range)+ganttBarHTML(p,range,role)+'</div>'+
+
+  nazwyGrup.forEach(function(g){
+    const portale=grupy[g].slice().sort(function(a,b){
+      return portalGanttWindow(a).end<portalGanttWindow(b).end?-1:1;
+    });
+    const kluczG='g:'+g, otwartaG=!!ganttOpen[kluczG];
+    const sredni=Math.round(portale.reduce(function(a,p){return a+portalPct(p);},0)/portale.length);
+
+    // --- POZIOM 1: geoportal ---
+    html+='<div style="display:flex;align-items:center;border-top:2px solid var(--border2);background:var(--surface2);cursor:pointer" '+
+        'onclick="ganttToggleNode(\''+esc(kluczG).replace(/'/g,"\\'")+'\')">'+
+      '<div style="width:'+GANTT_LABEL_W+'px;flex-shrink:0;padding-right:8px;font-size:11.5px;font-weight:700;'+
+        'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+
+        '<span style="display:inline-block;width:14px;color:var(--text3)">'+(otwartaG?'▾':'▸')+'</span>'+
+        esc(g)+' <span style="font-weight:400;color:var(--text3)">('+portale.length+' · '+sredni+'%)</span>'+
+      '</div>'+
+      '<div class="gantt-track" style="width:'+(range.days*GANTT_DAY_W)+'px;height:26px">'+
+        ganttTodayLineHTML(range)+ganttGroupBarHTML(portale,range)+'</div>'+
     '</div>';
+    if(!otwartaG) return;
+
+    // --- POZIOM 2: kompozycje ---
+    portale.forEach(function(p){
+      const m=users[p.currentOwner];
+      const kluczP='p:'+p.id, otwartyP=!!ganttOpen[kluczP];
+      html+='<div style="display:flex;align-items:center;border-top:1px solid var(--border)">'+
+        '<div style="width:'+GANTT_LABEL_W+'px;flex-shrink:0;padding-right:8px;font-size:11px;'+
+          'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:4px">'+
+          '<span style="cursor:pointer;color:var(--text3);width:16px;flex-shrink:0;padding-left:14px" '+
+            'onclick="event.stopPropagation();ganttToggleNode(\'p:'+p.id+'\')" title="Pokaż etapy">'+(otwartyP?'▾':'▸')+'</span>'+
+          (m?avatarHtml(m,17,7):'')+
+          '<span style="font-weight:600;cursor:pointer;overflow:hidden;text-overflow:ellipsis" '+
+            'onclick="openPortal(\''+p.id+'\')" title="'+esc(p.name)+'">'+esc(p.name)+'</span>'+
+        '</div>'+
+        '<div class="gantt-track" style="width:'+(range.days*GANTT_DAY_W)+'px;height:26px">'+
+          ganttTodayLineHTML(range)+ganttBarHTML(p,range,role)+'</div>'+
+      '</div>';
+      // --- POZIOM 3: etapy ---
+      if(otwartyP) html+=ganttStageRowsHTML(p,range,role);
+    });
   });
   html+='</div></div>';
   return html;
@@ -7986,6 +8195,81 @@ function commitGanttDrag(pid,edge,deltaDays){
   }
   saveDB();
   if(curView==='gantt') document.getElementById('main-content').innerHTML=renderGantt();
+}
+
+/* =========================================================================
+   v1.33 — PRZECIĄGANIE ETAPU Z AUTOMATYCZNYM PRZESUNIĘCIEM KOLEJNYCH.
+   Wydłużenie etapu N o X dni przesuwa etapy N+1, N+2… o dokładnie te same X
+   dni. Bez tego wydłużenie jednego etapu robiło zakładkę na następny i cały
+   plan trzeba było poprawiać ręcznie, etap po etapie.
+   Przesuwamy WSZYSTKIE daty kolejnych etapów (przyjęcie, rozpoczęcie,
+   zakończenie), żeby zachować ich długości.
+   ========================================================================= */
+let ganttStageDrag=null;
+function ganttStageDown(ev,pid,sid){
+  if(curUser().role!=='koord')return;
+  ev.preventDefault(); ev.stopPropagation();
+  const el=document.getElementById('gst-'+pid+'-'+sid);
+  if(!el)return;
+  ganttStageDrag={pid:pid,sid:sid,startX:ev.clientX,
+    origWidth:parseFloat(el.getAttribute('data-width')),deltaDays:0};
+  document.body.style.userSelect='none';
+}
+document.addEventListener('pointermove',function(ev){
+  if(!ganttStageDrag)return;
+  const el=document.getElementById('gst-'+ganttStageDrag.pid+'-'+ganttStageDrag.sid);
+  if(!el)return;
+  const delta=Math.round((ev.clientX-ganttStageDrag.startX)/GANTT_DAY_W);
+  ganttStageDrag.deltaDays=delta;
+  el.style.width=Math.max(GANTT_DAY_W*0.6,ganttStageDrag.origWidth+delta*GANTT_DAY_W)+'px';
+});
+document.addEventListener('pointerup',function(){
+  if(!ganttStageDrag)return;
+  const d=ganttStageDrag; ganttStageDrag=null; document.body.style.userSelect='';
+  if(d.deltaDays!==0) commitGanttStageDrag(d.pid,d.sid,d.deltaDays);
+});
+function commitGanttStageDrag(pid,sid,deltaDays){
+  const p=db.portals.find(function(x){return x.id===pid;}); if(!p)return;
+  const idx=(p.stages||[]).findIndex(function(s){return s.id===sid;});
+  if(idx<0)return;
+  const s=p.stages[idx];
+  if(!s.dates||!s.dates.done){
+    toast('Ten etap nie ma jeszcze daty zakończenia — nie ma czego przesuwać.');
+    return;
+  }
+  const nowaData=addDaysStr(s.dates.done,deltaDays);
+  const poczatek=s.dates.nowe||s.dates.wip||null;
+  if(poczatek&&nowaData<poczatek){
+    toast('Etap nie może kończyć się przed swoim rozpoczęciem.');
+    return;
+  }
+  s.dates.done=nowaData;
+
+  // przesunięcie kolejnych etapów o tę samą liczbę dni
+  let przesuniete=0;
+  for(let i=idx+1;i<p.stages.length;i++){
+    const n=p.stages[i];
+    if(!n.dates)continue;
+    let ruszony=false;
+    ['nowe','wip','done','problem'].forEach(function(k){
+      if(n.dates[k]){ n.dates[k]=addDaysStr(n.dates[k],deltaDays); ruszony=true; }
+    });
+    if(ruszony) przesuniete++;
+  }
+
+  // termin portalu też, jeśli etapy wyszłyby poza niego
+  const ostatnia=lastStageDoneDate(p);
+  if(ostatnia&&p.deadline&&ostatnia>p.deadline){
+    p.deadline=ostatnia;
+    toast('Termin portalu przesunięty na '+ostatnia+' — etapy wychodziły poza niego.');
+  }
+
+  const kierunek=deltaDays>0?'wydłużono':'skrócono';
+  logAction('gantt_stage',kierunek+' etap „'+s.name+'” w portalu „'+p.name+'” o '+Math.abs(deltaDays)+' dni'+
+    (przesuniete?' — przesunięto kolejne etapy: '+przesuniete:''));
+  saveDB();
+  if(curView==='gantt') document.getElementById('main-content').innerHTML=renderGantt();
+  if(przesuniete) toast('Przesunięto '+przesuniete+' kolejn'+(przesuniete===1?'y etap':'e etapy')+' o '+Math.abs(deltaDays)+' dni.');
 }
 
 /* =========================================================================
