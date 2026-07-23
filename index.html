@@ -6560,19 +6560,13 @@ function calGoToday(){
   calYear=d.getFullYear();calMonth=d.getMonth();
   document.getElementById('main-content').innerHTML=renderCalendar();
 }
-// Klucz tygodnia ISO (rok-tydzień), używany żeby wykryć "kolizje" — dwa
-// portale tej samej osoby z terminem w tym samym tygodniu.
-function isoWeekKey(dateStr){
-  const d=new Date(dateStr+'T00:00:00');
-  const target=new Date(d.valueOf());
-  const dayNr=(d.getDay()+6)%7;
-  target.setDate(target.getDate()-dayNr+3);
-  const firstThursday=target.valueOf();
-  target.setMonth(0,1);
-  if(target.getDay()!==4) target.setMonth(0,1+((4-target.getDay())+7)%7);
-  const week=1+Math.round((firstThursday-target.valueOf())/(7*86400000));
-  return target.getFullYear()+'-W'+week;
-}
+// v1.28 — funkcja isoWeekKey() USUNIĘTA razem z całym mechanizmem „kolizji".
+// Służyła wyłącznie do wykrywania, że dwa portale tej samej osoby kończą się w
+// tym samym tygodniu — i oznaczania tego czerwoną obwódką jako błędu. W pracy
+// geodezyjnej prowadzenie kilku tematów równolegle jest codziennością, a nie
+// pomyłką, więc kalendarz świecił ostrzeżeniami przy zupełnie normalnej
+// sytuacji. Zamiast alarmować, kalendarz pokazuje teraz równoległe portale
+// kaskadowo w torze danej osoby (patrz renderCalendar).
 /* =========================================================================
    v1.12 — NARZĘDZIA PLANOWANIA: nieobecności (#9), estymacje (#7),
    interaktywny wykres Gantta + obciążenie (#5).
@@ -7717,6 +7711,44 @@ function commitGanttDrag(pid,edge,deltaDays){
   if(curView==='gantt') document.getElementById('main-content').innerHTML=renderGantt();
 }
 
+/* =========================================================================
+   v1.28 — KALENDARZ W UKŁADZIE TORÓW (swimlane).
+
+   Poprzednia wersja była płaską listą portali, po jednym w wierszu, plus
+   mechanizm „kolizji" krzyczący czerwoną obwódką, gdy jedna osoba miała dwa
+   terminy w tym samym tygodniu. Przy prowadzeniu kilkunastu tematów naraz —
+   czyli w normalnej pracy — ekran był ścianą pasków usianą ostrzeżeniami o
+   czymś, co nie jest błędem.
+
+   Teraz każda osoba ma własny tor. Jej równoległe portale układają się w nim
+   kaskadowo, jeden pod drugim, więc nigdy na siebie nie nachodzą i od razu
+   widać, ile ktoś ciągnie naraz. Ten sam układ działa w podziale na geoportale
+   (przełącznik u góry).
+   ========================================================================= */
+let calMode='people'; // 'people' | 'groups'
+function setCalMode(m){
+  calMode=m;
+  document.getElementById('main-content').innerHTML=renderCalendar();
+}
+
+// Układa paski w torze tak, żeby się nie nachodziły: każdy trafia do pierwszego
+// rzędu, w którym jest miejsce. To jest ta „kaskada" — zamiast nakładać paski
+// na siebie, tor po prostu rośnie w dół.
+function calPackRows(items){
+  const rows=[];
+  items.slice().sort(function(a,b){ return a.startDay-b.startDay || a.endDay-b.endDay; })
+    .forEach(function(it){
+      let r=0;
+      while(true){
+        if(!rows[r]) rows[r]=[];
+        const koliduje=rows[r].some(function(x){ return it.startDay<=x.endDay && x.startDay<=it.endDay; });
+        if(!koliduje){ it.row=r; rows[r].push(it); break; }
+        r++;
+      }
+    });
+  return {items:items,rowCount:Math.max(1,rows.length)};
+}
+
 function renderCalendar(){
   initCalIfNeeded();
   const daysInMonth=new Date(calYear,calMonth+1,0).getDate();
@@ -7727,92 +7759,144 @@ function renderCalendar(){
   const withDeadline=db.portals.filter(function(p){return !!p.deadline;});
   const noDeadlineCount=db.portals.length-withDeadline.length;
 
-  // Kolizje: ten sam właściciel + termin w tym samym tygodniu (ISO), patrzymy
-  // na WSZYSTKIE portale z terminem, nie tylko te widoczne w bieżącym miesiącu.
-  const weekGroups={};
-  withDeadline.forEach(function(p){
-    const key=p.currentOwner+'|'+isoWeekKey(p.deadline);
-    if(!weekGroups[key])weekGroups[key]=[];
-    weekGroups[key].push(p.id);
-  });
-  const collisionIds=new Set();
-  Object.keys(weekGroups).forEach(function(k){
-    if(weekGroups[k].length>1) weekGroups[k].forEach(function(id){collisionIds.add(id);});
-  });
-
-  // Widoczne w tym miesiącu: zakres [przydzielenie, termin] nachodzi na miesiąc.
-  // Dodatkowo pokazuj portale, które mają daty w etapach w tym miesiącu.
+  // Widoczne w tym miesiącu: zakres [przydzielenie, termin] nachodzi na miesiąc
+  // albo któryś etap ma w nim datę.
   const visible=withDeadline.filter(function(p){
     const s=p.createdAt||p.deadline;
-    // Sprawdzenie czy portal deadline jest w zakresie miesiąca
     if(s<=monthEndStr && p.deadline>=monthStartStr) return true;
-    // Sprawdzenie czy którykolwiek etap ma datę w zakresie miesiąca
     return p.stages.some(function(stage){
-      return Object.values(stage.dates).some(function(dateVal){
-        return dateVal>=monthStartStr && dateVal<=monthEndStr;
-      });
+      return Object.values(stage.dates||{}).some(function(d){ return d>=monthStartStr && d<=monthEndStr; });
     });
-  }).sort(function(a,b){return (a.deadline<b.deadline)?-1:(a.deadline>b.deadline?1:0);});
+  });
 
-  const dayW=24,labelW=180,rowH=28;
+  const dayW=24,labelW=190,barH=18,barGap=4,lanePad=6;
   const rulerW=daysInMonth*dayW;
+  const dzisStr=today();
 
   let html=backButton()+'<h2 style="font-size:18px;font-weight:700;margin-bottom:6px">Kalendarz</h2>'+
-    '<div style="font-size:12px;color:var(--text3);margin-bottom:12px">Oś czasu portali — pasek od daty przydzielenia do terminu. Kolor paska = postęp.</div>'+
-    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">'+
+    '<div style="font-size:12px;color:var(--text3);margin-bottom:12px">Oś czasu portali — pasek od daty przydzielenia do terminu, kolor według postępu. '+
+      'Portale prowadzone równolegle układają się jeden pod drugim w torze tej samej osoby.</div>'+
+    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">'+
       '<button class="btn btn-sm" onclick="calPrevMonth()">← Poprzedni</button>'+
-      '<div style="font-size:14px;font-weight:700;min-width:160px;text-align:center">'+MONTH_PL[calMonth]+' '+calYear+'</div>'+
+      '<div style="font-size:14px;font-weight:700;min-width:150px;text-align:center">'+MONTH_PL[calMonth]+' '+calYear+'</div>'+
       '<button class="btn btn-sm" onclick="calNextMonth()">Następny →</button>'+
       '<button class="btn btn-sm" onclick="calGoToday()">Dziś</button>'+
+      '<div style="flex:1"></div>'+
+      '<div style="display:flex;gap:0;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">'+
+        '<button class="btn btn-sm" style="border:none;border-radius:0;'+(calMode==='people'?'background:var(--accent);color:#fff':'')+'" onclick="setCalMode(\'people\')">👥 Wg osób</button>'+
+        '<button class="btn btn-sm" style="border:none;border-radius:0;'+(calMode==='groups'?'background:var(--accent);color:#fff':'')+'" onclick="setCalMode(\'groups\')">🗂️ Wg geoportali</button>'+
+      '</div>'+
     '</div>';
 
   if(!visible.length){
     html+='<div class="card empty">Brak portali z terminem w tym miesiącu.</div>';
-  } else {
-    html+='<div class="card" style="overflow-x:auto;padding:10px 1.25rem">';
-    html+='<div style="display:flex">'+
-      '<div style="width:'+labelW+'px;flex-shrink:0"></div>'+
-      '<svg width="'+rulerW+'" height="22" style="flex-shrink:0">';
-    for(let d=1;d<=daysInMonth;d++){
-      const x=(d-1)*dayW;
-      const wd=new Date(calYear,calMonth,d).getDay();
-      const weekend=(wd===0||wd===6);
-      html+='<rect x="'+x+'" y="0" width="'+dayW+'" height="22" fill="'+(weekend?'#efece4':'transparent')+'"/>'+
-        '<text x="'+(x+dayW/2)+'" y="15" text-anchor="middle" font-size="10" fill="#888780">'+d+'</text>';
-    }
-    html+='</svg></div>';
+    if(noDeadlineCount>0) html+='<div style="font-size:11px;color:var(--text3);margin-top:10px">ℹ️ '+noDeadlineCount+' portal(i/e) bez ustalonego terminu nie jest pokazanych na osi czasu.</div>';
+    return html;
+  }
 
-    visible.forEach(function(p){
-      const pct=portalPct(p);
-      const barColor=pct>=70?'#1baf7a':pct>=30?'#eda100':'#b4b2a9';
-      const m=users[p.currentOwner];
+  // --- grupowanie w tory ---
+  const lanes={};
+  visible.forEach(function(p){
+    const key=calMode==='people'?(p.currentOwner||'—'):(p.group||'— bez geoportalu —');
+    if(!lanes[key]) lanes[key]=[];
+    lanes[key].push(p);
+  });
+  const laneKeys=Object.keys(lanes).sort(function(a,b){
+    if(calMode==='people'){
+      const na=(users[a]||{}).name||a, nb=(users[b]||{}).name||b;
+      return String(na).localeCompare(String(nb),'pl');
+    }
+    return String(a).localeCompare(String(b),'pl');
+  });
+
+  // --- linijka dni ---
+  html+='<div class="card" style="overflow-x:auto;padding:10px 1.25rem">';
+  html+='<div style="display:flex">'+
+    '<div style="width:'+labelW+'px;flex-shrink:0"></div>'+
+    '<svg width="'+rulerW+'" height="22" style="flex-shrink:0">';
+  for(let d=1;d<=daysInMonth;d++){
+    const x=(d-1)*dayW;
+    const wd=new Date(calYear,calMonth,d).getDay();
+    const weekend=(wd===0||wd===6);
+    const dStr=calYear+'-'+pad2(calMonth+1)+'-'+pad2(d);
+    const jestDzis=(dStr===dzisStr);
+    html+='<rect x="'+x+'" y="0" width="'+dayW+'" height="22" fill="'+(weekend?'var(--surface2)':'transparent')+'"/>'+
+      '<text x="'+(x+dayW/2)+'" y="15" text-anchor="middle" font-size="10" '+
+        'fill="'+(jestDzis?'var(--accent)':'var(--text3)')+'" font-weight="'+(jestDzis?'700':'400')+'">'+d+'</text>';
+  }
+  html+='</svg></div>';
+
+  // --- tory ---
+  laneKeys.forEach(function(key){
+    const lista=lanes[key];
+    // pozycje pasków w obrębie tego toru
+    const items=lista.map(function(p){
       const startStr=(p.createdAt&&p.createdAt>=monthStartStr)?p.createdAt:monthStartStr;
       const endStr=(p.deadline<=monthEndStr)?p.deadline:monthEndStr;
-      const startDay=Number(startStr.slice(8,10));
-      const endDay=Number(endStr.slice(8,10));
-      const x=(startDay-1)*dayW;
-      const w=Math.max((endDay-startDay+1)*dayW-4,dayW-4);
-      const isCollision=collisionIds.has(p.id);
-      html+='<div style="display:flex;align-items:center;height:'+rowH+'px;border-top:1px solid var(--border)">'+
-        '<div style="width:'+labelW+'px;flex-shrink:0;padding-right:8px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" onclick="openPortal(\''+p.id+'\')" title="'+esc(p.name)+'">'+
-          '<span style="font-weight:600">'+esc(p.name)+'</span> <span style="color:var(--text3)">· '+(m?esc(m.ini):'—')+'</span>'+
-        '</div>'+
-        '<svg width="'+rulerW+'" height="'+rowH+'" style="flex-shrink:0;cursor:pointer" onclick="openPortal(\''+p.id+'\')">'+
-          '<rect x="'+(x+2)+'" y="6" width="'+w+'" height="16" rx="4" fill="'+barColor+'" stroke="'+(isCollision?'#E24B4A':'none')+'" stroke-width="'+(isCollision?2:0)+'">'+
-            '<title>'+esc(p.name)+' — '+pct+'%'+(isCollision?' · KOLIZJA: inny portal tej samej osoby kończy się w tym samym tygodniu':'')+'</title>'+
-          '</rect>'+
-          (isCollision?'<text x="'+(x+w+6)+'" y="18" font-size="12">⚠️</text>':'')+
-        '</svg>'+
-      '</div>';
+      return {p:p,startDay:Number(startStr.slice(8,10)),endDay:Number(endStr.slice(8,10)),row:0};
     });
-    html+='</div>';
-  }
+    const packed=calPackRows(items);
+    const laneH=packed.rowCount*(barH+barGap)-barGap+lanePad*2;
+
+    // opis toru po lewej
+    let opis;
+    if(calMode==='people'){
+      const u=users[key];
+      const aktywne=lista.filter(function(p){return portalPct(p)<100;}).length;
+      opis='<div style="display:flex;align-items:center;gap:7px;min-width:0">'+
+        (u?avatarHtml(u,26,10):'')+
+        '<div style="min-width:0">'+
+          '<div style="font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(u?u.name:key)+'</div>'+
+          '<div style="font-size:10px;color:var(--text3)">'+lista.length+' w tym miesiącu'+(aktywne?' · '+aktywne+' aktywn'+(aktywne===1?'y':'e'):'')+'</div>'+
+        '</div>'+
+      '</div>';
+    } else {
+      opis='<div style="min-width:0">'+
+        '<div style="font-size:12px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(key)+'</div>'+
+        '<div style="font-size:10px;color:var(--text3)">'+lista.length+' kompozycj'+(lista.length===1?'a':'e')+'</div>'+
+      '</div>';
+    }
+
+    html+='<div style="display:flex;align-items:flex-start;border-top:1px solid var(--border);padding:'+lanePad+'px 0">'+
+      '<div style="width:'+labelW+'px;flex-shrink:0;padding-right:10px">'+opis+'</div>'+
+      '<svg width="'+rulerW+'" height="'+laneH+'" style="flex-shrink:0">';
+
+    // tło weekendów przez całą wysokość toru
+    for(let d=1;d<=daysInMonth;d++){
+      const wd=new Date(calYear,calMonth,d).getDay();
+      if(wd===0||wd===6) html+='<rect x="'+((d-1)*dayW)+'" y="0" width="'+dayW+'" height="'+laneH+'" fill="var(--surface2)"/>';
+    }
+    // pionowa kreska „dziś"
+    if(dzisStr>=monthStartStr&&dzisStr<=monthEndStr){
+      const xd=(Number(dzisStr.slice(8,10))-0.5)*dayW;
+      html+='<line x1="'+xd+'" y1="0" x2="'+xd+'" y2="'+laneH+'" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="3,3" opacity=".7"/>';
+    }
+
+    packed.items.forEach(function(it){
+      const p=it.p, pct=portalPct(p);
+      const kolor=pct>=70?'var(--success)':pct>=30?'var(--warning)':'var(--border2)';
+      const x=(it.startDay-1)*dayW+2;
+      const w=Math.max((it.endDay-it.startDay+1)*dayW-4,dayW-4);
+      const y=it.row*(barH+barGap);
+      const etykieta=esc(p.name)+' ['+pct+'%]';
+      // Napis mieści się w pasku dopiero od pewnej szerokości — przy krótkich
+      // paskach wypisujemy go obok, żeby nigdy nie był ucięty ani nieczytelny.
+      const wewnatrz=w>Math.max(90,etykieta.length*6.2);
+      html+='<g style="cursor:pointer" onclick="openPortal(\''+p.id+'\')">'+
+        '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+barH+'" rx="4" fill="'+kolor+'" opacity=".92">'+
+          '<title>'+esc(p.name)+' — '+pct+'%'+(calMode==='people'?'':' · '+esc((users[p.currentOwner]||{}).name||''))+'</title>'+
+        '</rect>'+
+        (wewnatrz
+          ? '<text x="'+(x+7)+'" y="'+(y+barH/2+4)+'" font-size="10.5" font-weight="600" fill="#fff" style="pointer-events:none">'+etykieta+'</text>'
+          : '<text x="'+(x+w+6)+'" y="'+(y+barH/2+4)+'" font-size="10.5" font-weight="600" fill="var(--text2)" style="pointer-events:none">'+etykieta+'</text>')+
+      '</g>';
+    });
+    html+='</svg></div>';
+  });
+  html+='</div>';
 
   if(noDeadlineCount>0){
     html+='<div style="font-size:11px;color:var(--text3);margin-top:10px">ℹ️ '+noDeadlineCount+' portal(i/e) bez ustalonego terminu nie jest pokazanych na osi czasu.</div>';
-  }
-  if(collisionIds.size>0){
-    html+='<div style="font-size:11px;color:var(--danger-text);margin-top:4px">⚠️ Wykryto kolizje terminów — dwa lub więcej portali tej samej osoby kończą się w tym samym tygodniu (oznaczone czerwoną obwódką).</div>';
   }
   return html;
 }
