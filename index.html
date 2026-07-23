@@ -6026,8 +6026,26 @@ function portalCompletedDate(p){
    dla portali w toku — dzisiaj.
    ========================================================================= */
 function portalDurationDays(p){
-  const start=p.createdAt||firstStageDate(p);
+  // POCZĄTEK PRAC to NAJWCZEŚNIEJSZA data, jaką znamy dla tego portalu —
+  // bierzemy wcześniejszą z dwóch: daty wpisania portalu do aplikacji i
+  // pierwszej daty w etapach.
+  //
+  // Dlaczego nie sam p.createdAt (tak było w pierwszej wersji i było źle):
+  // createdAt to moment ZAŁOŻENIA WPISU w aplikacji, a nie rozpoczęcia pracy.
+  // Prawie cała baza była uzupełniana wstecz — daty etapów sięgają marca, a
+  // wpisy powstały w lipcu. Liczone od createdAt wychodziło „Zbudowany w
+  // 1 dzień" przy pracy, która realnie trwała cztery miesiące.
+  //
+  // firstStageDate() przegląda WSZYSTKIE daty we WSZYSTKICH etapach (przyjęcie,
+  // rozpoczęcie, zakończenie), więc łapie też portale, w których pierwszy etap
+  // ma tylko datę zakończenia.
+  const cAt=p.createdAt||null;
+  const fsd=firstStageDate(p);
+  let start;
+  if(cAt&&fsd) start=(cAt<fsd?cAt:fsd);
+  else start=cAt||fsd;
   if(!start) return null;
+
   const done=portalCompletedDate(p);
   const end=done||today();
   if(end<start) return null; // zbite daty — lepiej nie pokazywać nic niż bzdurę
@@ -6042,9 +6060,11 @@ function portalDurationBadge(p,small){
   if(!d) return '';
   const fs=small?'10px':'11px';
   const pad=small?'2px 7px':'3px 9px';
+  // Pełne daty z rokiem — prace potrafią się ciągnąć przez kilka miesięcy albo
+  // i przez przełom roku, a samo „15.03" nie mówi wtedy nic pewnego.
   const tt=d.done
-    ? 'Od '+fmtDayMon(d.start)+' do '+fmtDayMon(d.end)
-    : 'Trwa od '+fmtDayMon(d.start);
+    ? 'Prace od '+d.start+' do '+d.end
+    : 'Prace trwają od '+d.start;
   const styl=d.done
     ? 'background:var(--success-bg);color:var(--success-text);border:1px solid var(--success)'
     : 'background:var(--warning-bg);color:var(--warning-text);border:1px solid var(--warning)';
