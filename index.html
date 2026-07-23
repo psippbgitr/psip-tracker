@@ -372,6 +372,21 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 #update-banner .btn:hover{background:rgba(255,255,255,.22)}
 #update-banner .btn-primary{background:#1baf7a;border-color:#1baf7a}
 #update-banner .btn-primary:hover{background:#17a06d}
+/* v1.34 — baner trybu podglądu. Fioletowy, bo musi być natychmiast odróżnialny
+   od granatowego „nowa wersja" i czerwonego „niezapisane zmiany"; przy nim
+   aplikacja zachowuje się inaczej niż zwykle (zapis wyłączony), więc mylenie
+   go z czymkolwiek innym byłoby kosztowne. */
+#impersonate-banner{position:fixed;top:0;left:0;right:0;z-index:960;background:#5b3fa8;color:#fff;
+  padding:9px 16px;font-size:13px;display:none;align-items:center;justify-content:center;
+  gap:14px;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,.25)}
+#impersonate-banner.show{display:flex}
+#impersonate-banner b{font-weight:700}
+#impersonate-banner .btn{padding:5px 12px;font-size:12px;border-radius:6px;
+  border:1px solid rgba(255,255,255,.45);background:rgba(255,255,255,.15);color:#fff;cursor:pointer}
+#impersonate-banner .btn:hover{background:rgba(255,255,255,.28)}
+/* Delikatna ramka wokół całej aplikacji — żeby po zwinięciu strony w dół
+   nadal było widać, że to nie jest zwykły widok. */
+body.impersonating{box-shadow:inset 0 0 0 3px #5b3fa8}
 /* v1.10 — baner "zmiany czekają na zapis". W przeciwieństwie do małej kropki
    sync-dot w górnym pasku (łatwej do przeoczenia), to jest niemożliwe do
    przegapienia ostrzeżenie: coś nie zapisało się na serwerze i inne osoby
@@ -674,6 +689,10 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
         <span id="sync-txt">Zsynchronizowano</span>
       </div>
       <div class="theme-seg" id="theme-btn" onclick="toggleTheme()" title="Motyw dzień / noc"><span class="seg sun">☀️</span><span class="seg moon">🌙</span></div>
+      <!-- v1.34: podgląd cudzego widoku — lista budowana w renderImpersonatePicker(),
+           bo skład zespołu zmienia się w czasie działania aplikacji. -->
+      <select id="imp-picker" onchange="startImpersonation(this.value)" title="Zobacz aplikację oczami innej osoby"
+        style="display:none;font-size:12px;padding:4px 6px;max-width:190px"></select>
       <button class="btn btn-sm" id="refresh-btn" onclick="manualRefresh()" title="Pobierz najnowsze dane z bazy">⟳ Odśwież</button>
       <button class="btn btn-sm" onclick="logout()">Wyloguj</button>
     </div>
@@ -694,6 +713,13 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
   <span>🔄 Dostępna nowa wersja aplikacji (<b id="ub-version">—</b>). Twoje dane są bezpieczne — kliknij, żeby wczytać aktualizację.</span>
   <button class="btn btn-primary" onclick="applyUpdate()">Odśwież teraz</button>
   <button class="btn" onclick="dismissUpdateBanner()">Później</button>
+</div>
+<!-- v1.34: tryb podglądu cudzego widoku. Baner jest jaskrawy i nie do
+     przeoczenia CELOWO — w tym trybie zapis jest zablokowany, więc admin musi
+     od razu wiedzieć, dlaczego jego zmiany „nie działają". -->
+<div id="impersonate-banner">
+  <span>🕵️ <b>Tryb podglądu:</b> widzisz aplikację jako <b id="imp-who">—</b>. Zapisywanie zmian jest wyłączone.</span>
+  <button class="btn" onclick="stopImpersonation()">✕ Zakończ podgląd</button>
 </div>
 <div id="welcome-overlay">
   <div class="wc-box">
@@ -1230,7 +1256,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 // Wersja aplikacji — widoczna w stopce ekranu logowania. Podbijaj przy każdym
 // wdrożeniu: zespół od razu widzi, czy ma świeżą wersję, a nie starą z cache
 // przeglądarki (przy problemach: Ctrl+Shift+R odświeża z pominięciem cache).
-const APP_VERSION = '1.33.0';
+const APP_VERSION = '1.34.0';
 
 /* =========================================================================
    v1.7 — powiadomienie "dostępna nowa wersja". Zasada: publikujesz nową
@@ -1291,8 +1317,13 @@ function dismissUpdateBanner(){
 function repositionBanners(){
   const ub=document.getElementById('update-banner');
   const pb=document.getElementById('pending-write-banner');
+  const ib=document.getElementById('impersonate-banner');
   if(!ub||!pb)return;
-  pb.style.top=(ub.classList.contains('show')?ub.offsetHeight:0)+'px';
+  // v1.34: baner podglądu jest NAJWYŻEJ — pozostałe schodzą pod niego, żeby
+  // żaden się nie chował za drugim.
+  const impH=(ib&&ib.classList.contains('show'))?ib.offsetHeight:0;
+  ub.style.top=impH+'px';
+  pb.style.top=(impH+(ub.classList.contains('show')?ub.offsetHeight:0))+'px';
 }
 function applyUpdate(){
   // Zanim przeładujemy, upewnij się, że Service Worker nie poda starej
@@ -1699,6 +1730,9 @@ function userDisplayName(userId){
   return (getUsers()[userId]||{}).name||userId||'—';
 }
 function logAction(action,summary,meta){
+  // W podglądzie nie dopisujemy nic do dziennika — inaczej w historii zostałyby
+  // wpisy podpisane cudzym nazwiskiem, a to jest gorsze niż brak wpisu.
+  if(impersonating) return;
   if(!db.actionLog) db.actionLog=[];
   db.actionLog.unshift({id:uid(),ts:nowISO(),user:cu,userName:userDisplayName(cu),action:action,summary:summary||'',meta:meta||null});
   if(db.actionLog.length>500) db.actionLog.length=500; // ograniczenie, żeby log nie rósł w nieskończoność
@@ -1709,6 +1743,9 @@ function logLogin(userId,offline){
   if(db.loginLog.length>500) db.loginLog.length=500;
 }
 function touchPresence(userId){
+  // W podglądzie NIE odnotowujemy obecności — inaczej podglądana osoba
+  // pokazywałaby się reszcie zespołu jako aktywna, choć jej tu nie ma.
+  if(impersonating) return;
   if(!db.presence) db.presence={};
   // v1.27: przy okazji odnotowujemy wersję aplikacji, z której ktoś korzysta.
   // Dzięki temu widać, kto ma już nową wersję — a to jest warunek zamknięcia
@@ -2254,6 +2291,10 @@ function theirsUsableForMerge(mine,theirs){
    ========================================================================= */
 let _saveChain=Promise.resolve();
 function saveDB(){
+  // v1.34 — BLOKADA W TRYBIE PODGLĄDU. Tu, a nie przy przyciskach: każda
+  // zmiana danych w aplikacji przechodzi przez saveDB() albo saveDBSoon(),
+  // więc jedna blokada w tym miejscu zamyka wszystkie ścieżki naraz.
+  if(impersonating){ blokadaZapisuPodglad(); return Promise.resolve(); }
   flushDirtySave(); // jeśli czekał zaplanowany zapis (debounce), scal go w ten
   _saveChain=_saveChain.then(function(){ return _saveDBOnce(); }).catch(function(){});
   return _saveChain;
@@ -2269,6 +2310,7 @@ let _dirtySaveTimer=null;
 const DIRTY_SAVE_DELAY_MS=700;
 function markLocalDirty(){ _hasUnsavedLocal=true; }
 function saveDBSoon(){
+  if(impersonating){ blokadaZapisuPodglad(); return; } // patrz saveDB()
   markLocalDirty();
   try{ localStorage.setItem(LOCAL_BACKUP_KEY,JSON.stringify(db)); }catch(e){}
   setSyncStatus('saving');
@@ -2485,8 +2527,134 @@ function activeUsers(){
   const u=getUsers();
   return Object.entries(u).filter(function(e){return e[1].active!==false;});
 }
+/* =========================================================================
+   v1.34 — TRYB PODGLĄDU (jak widzi aplikację ktoś inny).
+
+   Po co: koordynator projektuje widoki dla całego zespołu, ale sam widzi
+   wszędzie wariant administratora. Żeby sprawdzić, czy pracownik faktycznie
+   widzi to, co powinien (i czy nie widzi tego, czego nie powinien), trzeba
+   było prosić kogoś o zalogowanie się przy sobie.
+
+   Jak to działa: `cu` na czas podglądu wskazuje podglądaną osobę — dzięki temu
+   CAŁA aplikacja (a jest 176 miejsc czytających `cu`) zachowuje się dokładnie
+   tak, jak u niej, bez przerabiania każdego z nich osobno. Prawdziwe konto
+   siedzi w `realCu`.
+
+   Dlaczego to jest bezpieczne: ZAPIS JEST ZABLOKOWANY U ŹRÓDŁA — w saveDB(),
+   saveDBSoon() i logAction(). Nie da się tego obejść żadną ścieżką w
+   aplikacji, bo każda zmiana danych i tak przechodzi przez te trzy funkcje.
+   Gdyby blokada była przy przyciskach, wystarczyłby jeden pominięty przycisk,
+   żeby admin zapisał coś w cudzym imieniu.
+   ========================================================================= */
+let realCu=null;               // prawdziwe konto, gdy trwa podgląd
+let impersonating=false;
+let impRoleOnly=null;          // podgląd samej ROLI (bez konkretnej osoby)
+
+function isImpersonating(){ return impersonating; }
+// Prawdziwe konto — do wszystkiego, co dotyczy TOŻSAMOŚCI, nie widoku.
+function effectiveRealCu(){ return realCu||cu; }
+
 function curUser(){
+  if(impRoleOnly){
+    // Podgląd samej roli: bierzemy dane zalogowanego, ale podmieniamy rolę.
+    const baza=getUsers()[effectiveRealCu()]||{};
+    return Object.assign({},baza,{role:impRoleOnly,
+      roleLabel:(DEFAULT_ROLE_LABEL&&DEFAULT_ROLE_LABEL[impRoleOnly])||impRoleOnly});
+  }
   return getUsers()[cu]||{role:'worker',name:'',ini:'?',roleLabel:''};
+}
+
+function startImpersonation(target){
+  const prawdziwy=effectiveRealCu();
+  if((getUsers()[prawdziwy]||{}).role!=='koord'){ toast('Tryb podglądu jest tylko dla koordynatora.'); return; }
+  if(!target){ stopImpersonation(); return; }
+
+  // dokończ wszystko, co czeka na zapis — PRZED wejściem w tryb bez zapisu
+  try{ flushDirtySave(); }catch(e){}
+  stopPresenceTracking(); // w podglądzie nie odnotowujemy obecności
+
+  if(realCu===null) realCu=cu;
+  if(target.indexOf('role:')===0){
+    impRoleOnly=target.slice(5);
+    cu=realCu;                        // dane zostają własne, zmienia się tylko rola
+  } else {
+    impRoleOnly=null;
+    if(!getUsers()[target]){ toast('Nie znam takiego konta.'); return; }
+    cu=target;
+  }
+  impersonating=true;
+  curProfileId=null; mainContentIsPortalDetail=false;
+  odswiezBanerPodgladu();
+  renderSidebar();
+  navTo('dashboard');
+}
+
+function stopImpersonation(){
+  if(!impersonating) return;
+  cu=realCu||cu;
+  realCu=null; impRoleOnly=null; impersonating=false;
+  curProfileId=null; mainContentIsPortalDetail=false;
+  odswiezBanerPodgladu();
+  startPresenceTracking();
+  renderSidebar();
+  navTo('dashboard');
+  toast('Koniec podglądu — wróciłeś do swojego widoku.');
+}
+
+// Lista wyboru w górnym pasku. Widoczna WYŁĄCZNIE dla koordynatora — sprawdzamy
+// prawdziwe konto, nie podglądane, żeby w trakcie podglądu dało się z niego wyjść.
+function renderImpersonatePicker(){
+  const sel=document.getElementById('imp-picker');
+  if(!sel)return;
+  const prawdziwy=effectiveRealCu();
+  const jestKoord=((getUsers()[prawdziwy]||{}).role==='koord');
+  if(!jestKoord||!cu){ sel.style.display='none'; return; }
+  sel.style.display='';
+
+  const users=getUsers();
+  const osoby=Object.keys(users)
+    .filter(function(id){ return users[id]&&users[id].active!==false&&id!==prawdziwy; })
+    .sort(function(a,b){ return String(users[a].name).localeCompare(String(users[b].name),'pl'); });
+
+  let wartosc='';
+  if(impersonating) wartosc=impRoleOnly?('role:'+impRoleOnly):cu;
+
+  sel.innerHTML=
+    '<option value="">👁️ Podgląd jako…</option>'+
+    '<optgroup label="Rola">'+
+      ['worker','viewer'].map(function(r){
+        const et=(DEFAULT_ROLE_LABEL&&DEFAULT_ROLE_LABEL[r])||r;
+        return '<option value="role:'+r+'"'+(wartosc==='role:'+r?' selected':'')+'>Rola: '+esc(et)+'</option>';
+      }).join('')+
+    '</optgroup>'+
+    '<optgroup label="Osoba">'+
+      osoby.map(function(id){
+        return '<option value="'+id+'"'+(wartosc===id?' selected':'')+'>'+esc(users[id].name)+'</option>';
+      }).join('')+
+    '</optgroup>';
+}
+
+function odswiezBanerPodgladu(){
+  const b=document.getElementById('impersonate-banner');
+  if(!b)return;
+  b.classList.toggle('show',impersonating);
+  document.body.classList.toggle('impersonating',impersonating);
+  if(impersonating){
+    const kto=impRoleOnly
+      ? 'rola „'+((DEFAULT_ROLE_LABEL&&DEFAULT_ROLE_LABEL[impRoleOnly])||impRoleOnly)+'"'
+      : ((getUsers()[cu]||{}).name||cu);
+    const w=document.getElementById('imp-who');
+    if(w) w.textContent=kto;
+  }
+  repositionBanners();
+}
+
+// Komunikat pokazywany zamiast zapisu. Osobna funkcja, żeby brzmiał wszędzie
+// tak samo i żeby dało się go łatwo znaleźć.
+let _impToastAt=0;
+function blokadaZapisuPodglad(){
+  const teraz=Date.now();
+  if(teraz-_impToastAt>1500){ _impToastAt=teraz; toast('🔒 Tryb podglądu — zapis jest wyłączony.'); }
 }
 
 /* =========================================================================
@@ -2865,6 +3033,8 @@ async function restoreSession(){
 // odtwarzaniu sesji. Sama sekwencja powitalna zostaje tam, gdzie była: w
 // doLogin(), czyli przy świadomym logowaniu PIN-em.
 function enterApp(uid2,offline){
+  // czysty start — gdyby poprzednia sesja skończyła się w trybie podglądu
+  realCu=null; impRoleOnly=null; impersonating=false;
   cu=uid2;
   const usr=getUsers()[cu];
   logLogin(cu,!!offline);
@@ -3251,6 +3421,12 @@ function refreshTopbarAvatar(){
 }
 
 function logout(){
+  // v1.34: wyjście z podglądu PRZED wylogowaniem — inaczej realCu przepadłoby
+  // i przy następnym logowaniu aplikacja startowałaby z zablokowanym zapisem.
+  if(impersonating){
+    cu=realCu||cu; realCu=null; impRoleOnly=null; impersonating=false;
+    odswiezBanerPodgladu();
+  }
   stopPresenceTracking();
   // v1.27: wylogowanie kończy sesję także po stronie tego urządzenia — bez tego
   // token leżałby dalej w localStorage i następne otwarcie strony wpuściłoby
@@ -3389,6 +3565,7 @@ function renderSidebar(){
   document.getElementById('sidebar').innerHTML=html;
   updateUnlockCnt();
   updateQueueBadge();
+  renderImpersonatePicker(); // v1.34: lista „Podgląd jako…" zależy od składu zespołu
 }
 
 // v1.8: menu boczne na telefonie (patrz #sidebar-toggle-btn / @media(max-width:860px)
@@ -3588,6 +3765,7 @@ function gsClose(){
 const NTF_ICON={assigned:'📌',problem:'⚠️',unlock:'🔓',done:'✅',chat:'💬',pin_forgot:'🔑',gielda:'🛒',edit_request:'📝',edit_decided:'📝'};
 const NTF_DEFAULT_PREFS={assigned:true,problem:true,unlock:true,done:true,deadline:true};
 function pushNotification(to,type,text,pid,sid){
+  if(impersonating) return; // w podglądzie nie wysyłamy nikomu powiadomień
   if(!to||to===cu)return; // nie powiadamiamy autora zdarzenia
   if(!db.notifications)db.notifications=[];
   db.notifications.unshift({id:uid(),ts:nowISO(),to:to,type:type,text:text,pid:pid||null,sid:sid||null,read:false});

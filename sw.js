@@ -12,7 +12,7 @@
    PO KAŻDYM WDROŻENIU nowej wersji index.html podbij CACHE_NAME poniżej
    (np. ...-v1.1), żeby stali użytkownicy dostali świeżą powłokę.
    ============================================================================ */
-const CACHE_NAME = 'psip-tracker-v1.33.0';
+const CACHE_NAME = 'psip-tracker-v1.34.0';
 const SHELL = [
   './',
   './index.html',
