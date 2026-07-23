@@ -871,8 +871,17 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 
 <div id="modal-report" class="modal-bg">
   <div class="modal" style="max-width:680px">
+    <!-- v1.29: wybór okresu. Celowo POZA #report-print-area — przyciski nie mają
+         czego szukać na wydruku ani w PDF-ie. -->
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
+      <span style="font-size:12px;color:var(--text2);margin-right:2px">Okres:</span>
+      <button class="btn btn-xs" id="rp-week"    onclick="setReportPeriod('week')">Tydzień</button>
+      <button class="btn btn-xs" id="rp-month"   onclick="setReportPeriod('month')">Miesiąc</button>
+      <button class="btn btn-xs" id="rp-quarter" onclick="setReportPeriod('quarter')">Kwartał</button>
+      <button class="btn btn-xs" id="rp-year"    onclick="setReportPeriod('year')">Rok</button>
+    </div>
     <div id="report-print-area">
-      <h3>Raport tygodniowy PSIP</h3>
+      <h3 id="report-title">Raport PSIP</h3>
       <div id="report-txt" style="font-size:12px;font-family:monospace;background:#f9f8f5;
         border:1px solid var(--border);border-radius:var(--radius);padding:14px;
         white-space:pre-wrap;max-height:440px;overflow-y:auto;line-height:1.65"></div>
@@ -1164,7 +1173,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 // Wersja aplikacji — widoczna w stopce ekranu logowania. Podbijaj przy każdym
 // wdrożeniu: zespół od razu widzi, czy ma świeżą wersję, a nie starą z cache
 // przeglądarki (przy problemach: Ctrl+Shift+R odświeża z pominięciem cache).
-const APP_VERSION = '1.28.0';
+const APP_VERSION = '1.29.0';
 
 /* =========================================================================
    v1.7 — powiadomienie "dostępna nowa wersja". Zasada: publikujesz nową
@@ -10494,48 +10503,130 @@ function renameCatCategory(gi){
 /* =========================================================================
    RAPORT TYGODNIOWY
    ========================================================================= */
+/* =========================================================================
+   v1.29 — RAPORTY ZA WYBRANY OKRES, W DNIACH.
+
+   Raport był na sztywno „tygodniowy", choć w treści nie było ani jednego
+   ograniczenia czasowego — pokazywał po prostu bieżący stan całej bazy, więc
+   za każdym razem wyglądał tak samo i nie dało się z niego wyczytać, co
+   wydarzyło się w danym miesiącu czy kwartale. Teraz okres realnie zawęża to,
+   co raport liczy jako „wykonane": etapy zamknięte w tym przedziale i portale
+   oddane w tym przedziale. Bieżący stan (postęp, otwarte problemy) siłą rzeczy
+   pozostaje bieżący — to jest zdjęcie na dziś, nie za tamten okres.
+
+   Godziny zastąpione dniami, spójnie z resztą aplikacji (patrz
+   portalDurationDays) — nie trzeba ich nigdzie wpisywać, liczą się same.
+   ========================================================================= */
+let reportPeriod='week';
+function setReportPeriod(p){ reportPeriod=p; openReport(); }
+
+// Zakres dat wybranego okresu: od poniedziałku / 1. dnia miesiąca / kwartału /
+// roku do dziś. Zawsze do dziś, bo raport dotyczy okresu TRWAJĄCEGO.
+function reportRange(period){
+  const dt=new Date(); dt.setHours(0,0,0,0);
+  let from,label;
+  if(period==='month'){
+    from=new Date(dt.getFullYear(),dt.getMonth(),1);
+    label='Miesiąc: '+MONTH_PL[dt.getMonth()]+' '+dt.getFullYear();
+  } else if(period==='quarter'){
+    const q=Math.floor(dt.getMonth()/3);
+    from=new Date(dt.getFullYear(),q*3,1);
+    label='Kwartał '+(q+1)+' / '+dt.getFullYear()+' ('+MONTH_PL[q*3]+'–'+MONTH_PL[q*3+2]+')';
+  } else if(period==='year'){
+    from=new Date(dt.getFullYear(),0,1);
+    label='Rok '+dt.getFullYear();
+  } else {
+    from=mondayOf(dt);
+    const week=Math.ceil((((dt-new Date(dt.getFullYear(),0,1))/86400000)+1)/7);
+    label='Tydzień '+week+' / '+dt.getFullYear();
+  }
+  return {from:ymd(from),to:ymd(dt),label:label,
+    nazwa:{week:'TYGODNIOWY',month:'MIESIĘCZNY',quarter:'KWARTALNY',year:'ROCZNY'}[period]||'OKRESOWY'};
+}
+
 function openReport(){
-  const dt=new Date();
-  const week=Math.ceil((((new Date(dt.getFullYear(),dt.getMonth(),dt.getDate())-new Date(dt.getFullYear(),0,1))/86400000)+1)/7);
-  let txt='RAPORT TYGODNIOWY — PSIP\n';
-  txt+='Tydzień '+week+' / '+dt.getFullYear()+' · '+dt.toLocaleDateString('pl-PL')+'\n';
-  txt+='Podkarpackie Biuro Geodezji i Terenów Rolnych\n';
-  txt+=Array(57).join('─')+'\n\n';
+  const R=reportRange(reportPeriod);
+  const users=getUsers();
+
+  // podświetl aktywny okres
+  ['week','month','quarter','year'].forEach(function(k){
+    const b=document.getElementById('rp-'+k);
+    if(!b)return;
+    const akt=(k===reportPeriod);
+    b.style.background=akt?'var(--accent)':'';
+    b.style.color=akt?'#fff':'';
+    b.style.borderColor=akt?'var(--accent)':'';
+  });
+  const tEl=document.getElementById('report-title');
+  if(tEl) tEl.textContent='Raport '+R.nazwa.toLowerCase()+' PSIP';
+
+  // --- co wydarzyło się W OKRESIE ---
+  let etapyWOkresie=0;
+  const portaleOddane=[];
+  db.portals.forEach(function(p){
+    p.stages.forEach(function(s){
+      if(s.status==='done'&&s.dates&&s.dates.done&&s.dates.done>=R.from&&s.dates.done<=R.to) etapyWOkresie++;
+    });
+    const zam=portalCompletedDate(p);
+    if(zam&&zam>=R.from&&zam<=R.to) portaleOddane.push(p);
+  });
+
   const total=db.portals.reduce(function(a,p){return a+p.stages.length;},0);
   const done=db.portals.reduce(function(a,p){return a+p.stages.filter(function(s){return s.status==='done';}).length;},0);
   const prob=db.portals.reduce(function(a,p){return a+p.stages.filter(function(s){return s.status==='problem';}).length;},0);
   const avg=db.portals.length?Math.round(db.portals.reduce(function(a,p){return a+portalPct(p);},0)/db.portals.length):0;
-  const totalHours=db.portals.reduce(function(a,p){return a+portalTotalHours(p);},0);
-  txt+='PODSUMOWANIE\n';
-  txt+='Portale/kompozycje: '+db.portals.length+' · Etapy ukończone: '+done+'/'+total+'\n';
-  txt+='Średni postęp: '+avg+'% · Aktywne problemy: '+prob+' · Łączny czas pracy: '+fmtHours(totalHours)+' godz.\n\n';
+
+  let txt='RAPORT '+R.nazwa+' — PSIP\n';
+  txt+=R.label+' · '+R.from+' – '+R.to+'\n';
+  txt+='Podkarpackie Biuro Geodezji i Terenów Rolnych\n';
+  txt+=Array(57).join('─')+'\n\n';
+
+  txt+='W TYM OKRESIE\n';
+  txt+='Etapy zakończone: '+etapyWOkresie+' · Portale oddane: '+portaleOddane.length+'\n';
+  if(portaleOddane.length){
+    portaleOddane.forEach(function(p){
+      const d=portalDurationDays(p);
+      txt+='  ✓ '+p.name+' ['+((users[p.currentOwner]||{}).name||'—')+']'+(d?' — zbudowany w '+d.days+' '+dniLabel(d.days):'')+'\n';
+    });
+  }
+  txt+='\nSTAN NA DZIŚ\n';
+  txt+='Portale/kompozycje: '+db.portals.length+' · Etapy ukończone łącznie: '+done+'/'+total+'\n';
+  txt+='Średni postęp: '+avg+'% · Otwarte problemy: '+prob+'\n\n';
+
   txt+='STATUS PORTALI\n'+Array(37).join('─')+'\n';
   const groups={};
-  const users=getUsers();
   db.portals.forEach(function(p){if(!groups[p.group])groups[p.group]=[];groups[p.group].push(p);});
-  Object.keys(groups).forEach(function(grp){
-    const portals=groups[grp];
+  Object.keys(groups).sort(function(a,b){return String(a).localeCompare(String(b),'pl');}).forEach(function(grp){
     txt+='\n['+grp+']\n';
-    portals.forEach(function(p){
+    groups[grp].forEach(function(p){
       const m=users[p.currentOwner];const pct=portalPct(p);
+      const d=portalDurationDays(p);
       const curS=p.stages.find(function(s){return s.status==='wip'||s.status==='problem';});
-      txt+='  ▸ '+p.name+' ['+(m?m.name:'—')+'] — '+pct+'%\n';
+      txt+='  ▸ '+p.name+' ['+(m?m.name:'—')+'] — '+pct+'%'+(d?' · '+(d.done?'zbudowany w ':'w opracowaniu od ')+d.days+' '+dniLabel(d.days):'')+'\n';
       if(curS)txt+='    Aktualny etap: '+curS.name+' · '+STATE_LABEL[curS.status]+'\n';
       p.stages.filter(function(s){return s.status==='problem';}).forEach(function(s){
-        const lc=s.comments.filter(function(c){return c.type==='problem';}).slice(-1)[0];
+        const lc=(s.comments||[]).filter(function(c){return c.type==='problem';}).slice(-1)[0];
         txt+='    ⚠️ PROBLEM: '+s.name+(lc?' — '+lc.text:'')+'\n';
       });
     });
   });
+
   txt+='\nPOSTĘP ZESPOŁU\n'+Array(37).join('─')+'\n';
-  activeUsers().filter(function(e){return e[1].role==='worker'||e[1].role==='koord';}).forEach(function(e){
-    const uid2=e[0],u=e[1];
-    const myP=db.portals.filter(function(p){return p.currentOwner===uid2;});if(!myP.length)return;
-    const d=myP.reduce(function(a,p){return a+p.stages.filter(function(s){return s.status==='done';}).length;},0);
-    const t=myP.reduce(function(a,p){return a+p.stages.length;},0);
-    const h=myP.reduce(function(a,p){return a+portalTotalHours(p);},0);
-    txt+=u.name+': '+d+'/'+t+' etapów ('+(t?Math.round(d/t*100):0)+'%) · '+fmtHours(h)+' godz.\n';
+  teamStats().forEach(function(st){
+    if(!st.myP.length)return;
+    // etapy zamknięte przez tę osobę W OKRESIE
+    let wOkresie=0;
+    db.portals.forEach(function(p){
+      p.stages.forEach(function(s){
+        if(s.status==='done'&&s.dates&&s.dates.done&&s.dates.done>=R.from&&s.dates.done<=R.to
+           &&(s.owner||p.currentOwner)===st.id) wOkresie++;
+      });
+    });
+    txt+=st.u.name+': '+wOkresie+' etap'+(wOkresie===1?'':'ów')+' w okresie · '+
+      st.done+'/'+st.total+' łącznie ('+st.pct+'%)'+
+      (st.doneCount?' · średnio '+st.avgDays+' '+dniLabel(st.avgDays)+'/portal':'')+'\n';
   });
+
   txt+='\n'+Array(57).join('─')+'\nRaport wygenerowany automatycznie · PSIP Tracker · PBGiTR\n';
   document.getElementById('report-txt').textContent=txt;
   document.getElementById('report-table-wrap').innerHTML=buildReportTable();
@@ -10554,12 +10645,15 @@ function buildReportTable(){
       '<td style="padding:5px 6px;border-bottom:1px solid var(--border)">'+pct+'%</td>'+
       '<td style="padding:5px 6px;border-bottom:1px solid var(--border)">'+stageInfo+'</td>'+
       '<td style="padding:5px 6px;border-bottom:1px solid var(--border)">'+(p.deadline||'—')+'</td>'+
-      '<td style="padding:5px 6px;border-bottom:1px solid var(--border)">'+fmtHours(portalTotalHours(p))+' godz.</td>'+
+      // v1.29: czas trwania w dniach zamiast wpisywanych ręcznie godzin
+      '<td style="padding:5px 6px;border-bottom:1px solid var(--border);white-space:nowrap">'+
+        (function(){ const d=portalDurationDays(p); return d?(d.days+' '+dniLabel(d.days)+(d.done?'':' (trwa)')):'—'; })()+
+      '</td>'+
     '</tr>';
   }).join('');
   return '<table id="report-summary-table" style="width:100%;border-collapse:collapse;font-size:11px">'+
     '<thead><tr>'+
-      ['Portal','Właściciel','Postęp','Aktualny etap','Termin','Czas pracy łącznie'].map(function(h){
+      ['Portal','Właściciel','Postęp','Aktualny etap','Termin','Czas trwania'].map(function(h){
         return '<th style="text-align:left;padding:5px 6px;border-bottom:2px solid var(--border2);white-space:nowrap">'+h+'</th>';
       }).join('')+
     '</tr></thead><tbody>'+(rows||'<tr><td colspan="6" style="padding:8px;color:var(--text3)">Brak portali.</td></tr>')+'</tbody></table>';
