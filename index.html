@@ -420,6 +420,28 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
   body *{visibility:hidden}
   #report-print-area,#report-print-area *{visibility:visible}
   #report-print-area{position:absolute;top:0;left:0;width:100%}
+
+  /* v1.28 — POPRAWKA UCINANEGO WYDRUKU / PDF.
+     Na ekranie treść raportu siedzi w kontenerach z ograniczoną wysokością i
+     własnym suwakiem (#report-txt: 440px, #report-table-wrap: 280px), a całość
+     w oknie modalnym. Przy drukowaniu te ograniczenia obowiązywały dalej, więc
+     na papier trafiało TYLKO to, co akurat było widoczne na ekranie — reszta
+     raportu znikała bez śladu i bez ostrzeżenia. Tutaj je zdejmujemy: treść ma
+     się rozwinąć na pełną wysokość i rozlać na tyle stron, ile potrzeba. */
+  #report-print-area,#report-txt,#report-table-wrap,.modal,.modal-bg{
+    max-height:none !important;height:auto !important;overflow:visible !important;
+    box-shadow:none !important;border:none !important;
+  }
+  .modal-bg{position:static !important;display:block !important;padding:0 !important;background:none !important}
+  .modal{max-width:none !important;width:100% !important;padding:0 !important;border-radius:0 !important}
+  #report-txt{background:none !important;padding:0 !important;font-size:10.5pt !important;line-height:1.5 !important}
+  /* Tabela nie może się rwać w połowie wiersza ani gubić nagłówka na kolejnych
+     stronach — przy raporcie na kilka stron to jest różnica między dokumentem
+     do podpisu a wydrukiem do wyrzucenia. */
+  #report-table-wrap table{width:100% !important;border-collapse:collapse}
+  #report-table-wrap thead{display:table-header-group}
+  #report-table-wrap tr,#report-print-area h3{break-inside:avoid;page-break-inside:avoid}
+  #report-print-area h3{break-after:avoid;page-break-after:avoid}
 }
 
 /* =========================================================================
@@ -1944,7 +1966,8 @@ function dbConfigFingerprint(d){
   const wm=d.welcomeMessage;
   const wmPart=wm?(wm.updatedAt||'')+'|'+(wm.seenBy||[]).length:'';
   return (d.coordinatorEmail||'')+'|'+(d.freeDateEditEnabled===false?'0':'1')+'|'+usersPart+'|'+wmPart+
-    '|'+JSON.stringify(d.holidayPrefs||{})+'|'+JSON.stringify(d.catalog||null);
+    '|'+JSON.stringify(d.holidayPrefs||{})+'|'+JSON.stringify(d.catalog||null)+
+    '|'+(d.publicProfiles===true?'1':'0'); // v1.28: żeby ciche odświeżenie nie cofało tego przełącznika
 }
 
 // v1.27 — dawne loadDB() zniknęło. Pobierało CAŁĄ bazę przy samym otwarciu
@@ -3108,6 +3131,18 @@ function renderCurrentViewSafely(){
     restoreDraftFields(_drafts);
     return;
   }
+  // v1.28: to samo dla otwartej karty osobowej — odświeżenie w tle nie może
+  // wyrzucać z profilu z powrotem na listę, z której się do niego weszło.
+  if(curProfileId){
+    if(isViewBusy()){ deferredRenderPending=true; return; }
+    deferredRenderPending=false;
+    if(!getUsers()[curProfileId]){ curProfileId=null; if(curView){ renderSidebar(); navTo(curView); } return; }
+    const _d=captureDraftFields();
+    renderSidebar();
+    document.getElementById('main-content').innerHTML=renderUserProfile(curProfileId);
+    restoreDraftFields(_d);
+    return;
+  }
   if(!curView)return;
   if(isViewBusy()){ deferredRenderPending=true; return; }
   const _drafts=captureDraftFields();
@@ -3311,6 +3346,7 @@ function closeSidebar(){
 function navTo(view){
   deferredRenderPending=false;
   mainContentIsPortalDetail=false;
+  curProfileId=null; // v1.28: wyjście z karty osobowej przy każdej nawigacji
   curView=view;
   closeSidebar(); // po wybraniu pozycji menu na telefonie chowamy nakładkę
   updateNtfBadge(); // licznik powiadomień odświeżany przy każdej nawigacji
@@ -3901,9 +3937,17 @@ function myWeekStats(){
     else if(e.date>=prevMonStr&&e.date<thisMonStr)hoursPrev+=Number(e.hours)||0;
   });
   // Seria dni ROBOCZYCH z jakąkolwiek aktywnością (wpis w dzienniku akcji lub
-  // rejestrze czasu). Weekend nie przerywa serii, ale też jej nie wydłuża.
-  // Jeśli dziś jeszcze nic nie zrobiono, seria liczy się od wczoraj (bez kary
-  // za sprawdzenie panelu z samego rana).
+  // rejestrze czasu). Jeśli dziś jeszcze nic nie zrobiono, seria liczy się od
+  // wczoraj (bez kary za sprawdzenie panelu z samego rana).
+  //
+  // v1.28 — dzień, w którym NIE MIAŁO PRAWA nic się wydarzyć, nie może zrywać
+  // serii. Pomijamy więc (bez zerowania licznika): weekendy, święta ustawowo
+  // wolne ORAZ dni, w których ta osoba miała odnotowaną nieobecność — urlop,
+  // L4, delegację. Wcześniej pomijany był tylko weekend, więc tydzień urlopu
+  // kasował serię budowaną miesiącami, co było odbierane jako kara za
+  // wykorzystanie przysługującego wolnego.
+  // Seria rwie się WYŁĄCZNIE wtedy, gdy minął normalny dzień pracy, w którym
+  // ta osoba była dostępna i nie zrobiła w aplikacji nic.
   const activeDays={};
   (db.actionLog||[]).forEach(function(a){
     if(a.user===cu&&a.ts)activeDays[String(a.ts).slice(0,10)]=true;
@@ -3915,10 +3959,14 @@ function myWeekStats(){
   const cursor=new Date();
   cursor.setHours(0,0,0,0);
   if(!activeDays[ymd(cursor)])cursor.setDate(cursor.getDate()-1); // łaska na dziś
-  for(let i=0;i<120;i++){
-    const dow=cursor.getDay();
-    if(dow===0||dow===6){ cursor.setDate(cursor.getDate()-1); continue; } // weekend pomijamy
-    if(activeDays[ymd(cursor)]){ streak++; cursor.setDate(cursor.getDate()-1); }
+  // Limit 400 dni zamiast 120: przy pomijaniu urlopów i świąt cofamy się przez
+  // więcej dni kalendarzowych na tę samą liczbę dni roboczych.
+  for(let i=0;i<400;i++){
+    const dstr=ymd(cursor);
+    // isFreeDayStr obejmuje i weekend, i święta ustawowo wolne od pracy
+    if(isFreeDayStr(dstr)){ cursor.setDate(cursor.getDate()-1); continue; }
+    if(absenceOnDay(cu,dstr)){ cursor.setDate(cursor.getDate()-1); continue; } // urlop / L4 / delegacja
+    if(activeDays[dstr]){ streak++; cursor.setDate(cursor.getDate()-1); }
     else break;
   }
   return {doneThis:doneThis,donePrev:donePrev,hoursThis:hoursThis,hoursPrev:hoursPrev,streak:streak};
@@ -4121,25 +4169,67 @@ function milestonesHTML(p,pct){
 // Kompaktowy widget "kto jest teraz zalogowany" — widoczny dla wszystkich ról
 // na Przeglądzie. Status opiera się na znaczniku czasu "obecności" (db.presence),
 // odświeżanym co minutę przez zalogowane osoby (patrz startPresenceTracking()).
+// v1.28 — widżet rozdzielony na „Aktywni teraz" i „Nieaktywni". Wcześniej
+// wszyscy byli w jednej linii, różniąc się tylko kropką i grubością czcionki —
+// przy dziesięciu osobach trzeba było się wpatrywać, żeby wyłowić, kto
+// faktycznie siedzi w aplikacji. Teraz nieaktywni są wyraźnie wygaszeni i mają
+// podaną konkretną datę i godzinę ostatniej obecności zamiast „widziany 3 dni
+// temu", bo przy planowaniu pracy liczy się dokładny moment.
 function renderOnlineWidget(){
   const users=activeUsers().slice().sort(function(a,b){
-    const onA=isOnline(a[0]),onB=isOnline(b[0]);
-    if(onA!==onB) return onA?-1:1;
     return a[1].name.localeCompare(b[1].name,'pl');
   });
-  return '<div class="card" style="margin-bottom:12px">'+
-    '<div class="section-hdr" style="margin-top:0">Zespół — kto jest teraz zalogowany</div>'+
-    '<div style="display:flex;flex-wrap:wrap;gap:10px">'+
-    users.map(function(e){
-      const id=e[0],u=e[1];const online=isOnline(id);
-      return '<div style="display:flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--border);border-radius:20px" title="'+esc(lastSeenText(id))+'">'+
-        '<span style="width:8px;height:8px;border-radius:50%;background:'+(online?'var(--success)':'var(--border2)')+';flex-shrink:0"></span>'+
-        avatarHtml(u,22,9)+
-        '<span style="font-size:12px;font-weight:'+(online?700:400)+'">'+esc(u.name)+'</span>'+
-      '</div>';
-    }).join('')+
-    '</div>'+
-  '</div>';
+  const aktywni=users.filter(function(e){ return isOnline(e[0]); });
+  const nieaktywni=users.filter(function(e){ return !isOnline(e[0]); });
+
+  function pigulkaAktywny(e){
+    const id=e[0],u=e[1];
+    return '<div style="display:flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--success);'+
+      'background:var(--success-bg);border-radius:20px" title="'+esc(lastSeenText(id))+'">'+
+      '<span style="width:8px;height:8px;border-radius:50%;background:var(--success);flex-shrink:0"></span>'+
+      profileLink(id,avatarHtml(u,22,9)+'<span style="font-size:12px;font-weight:700">'+esc(u.name)+'</span>',
+        'display:flex;align-items:center;gap:6px')+
+    '</div>';
+  }
+  function pigulkaNieaktywny(e){
+    const id=e[0],u=e[1];
+    const p=(db.presence||{})[id];
+    const kiedy=(p&&p.lastSeen)?fmtDateTime(p.lastSeen):null;
+    // Nieobecność ma pierwszeństwo przed „ostatnio widziany" — jeśli ktoś jest
+    // na urlopie, to jest właśnie ta informacja, której się szuka.
+    const abs=absenceOnDay(id,today());
+    const at=abs?absenceType(abs.type):null;
+    const opis=abs
+      ? '<span style="font-size:10px;font-style:italic;color:var(--warning-text)">('+(at?at.icon+' '+esc(at.label):esc(abs.type))+')</span>'
+      // forma bezosobowa — w zespole są i kobiety, i mężczyźni, a „nie był
+      // zalogowany" wyświetlało się wszystkim jednakowo
+      : (kiedy?'<span style="font-size:10px;font-style:italic">(ostatnio: '+esc(kiedy)+')</span>':'<span style="font-size:10px;font-style:italic">(brak zapisanego logowania)</span>');
+    return '<div style="display:flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--border);'+
+      'border-radius:20px;opacity:.65" title="'+esc(lastSeenText(id))+'">'+
+      '<span style="width:8px;height:8px;border-radius:50%;background:var(--border2);flex-shrink:0"></span>'+
+      profileLink(id,avatarHtml(u,20,8)+'<span style="font-size:11.5px;color:var(--text3)">'+esc(u.name)+'</span>',
+        'display:flex;align-items:center;gap:6px')+
+      opis+
+    '</div>';
+  }
+
+  // Bez własnego nagłówka — moduł pulpitu ma już swój pasek („🟢 Kto jest
+  // online"), a drugi taki sam tuż pod nim tylko zabierał miejsce.
+  let html='<div class="card" style="margin-bottom:12px">';
+
+  if(aktywni.length){
+    html+='<div style="font-size:11px;font-weight:700;color:var(--success-text);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Aktywni teraz ('+aktywni.length+')</div>'+
+      '<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:'+(nieaktywni.length?'14px':'0')+'">'+
+      aktywni.map(pigulkaAktywny).join('')+'</div>';
+  } else {
+    html+='<div style="font-size:12px;color:var(--text3);margin-bottom:'+(nieaktywni.length?'14px':'0')+'">Nikt nie jest teraz zalogowany.</div>';
+  }
+  if(nieaktywni.length){
+    html+='<div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Nieaktywni ('+nieaktywni.length+')</div>'+
+      '<div style="display:flex;flex-wrap:wrap;gap:8px">'+
+      nieaktywni.map(pigulkaNieaktywny).join('')+'</div>';
+  }
+  return html+'</div>';
 }
 
 /* =========================================================================
@@ -5714,7 +5804,21 @@ function teamStats(){
     const total=myP.reduce(function(a,p){return a+p.stages.length;},0);
     const pct=total?Math.round(done/total*100):0;
     const hours=myP.reduce(function(a,p){return a+portalTotalHours(p);},0);
-    return {id:id,u:u,myP:myP,done:done,total:total,pct:pct,hours:hours};
+    // v1.28 — miara w DNIACH obok godzin. Średnia liczona WYŁĄCZNIE z portali
+    // zamkniętych: trwające zaniżałyby ją tym mocniej, im świeższe są, więc
+    // mieszanie jednych z drugimi dawałoby liczbę bez sensu. „Łącznie dni prac"
+    // obejmuje już wszystkie portale danej osoby, także te w toku — to miara
+    // obciążenia, nie tempa.
+    let sumDaysDone=0,cntDone=0,sumDaysAll=0;
+    myP.forEach(function(p){
+      const d=portalDurationDays(p);
+      if(!d)return;
+      sumDaysAll+=d.days;
+      if(d.done){ sumDaysDone+=d.days; cntDone++; }
+    });
+    const avgDays=cntDone?Math.round(sumDaysDone/cntDone):0;
+    return {id:id,u:u,myP:myP,done:done,total:total,pct:pct,hours:hours,
+      avgDays:avgDays,doneCount:cntDone,totalDays:sumDaysAll};
   });
 }
 
@@ -5723,10 +5827,12 @@ function renderTeam(){
   teamStats().forEach(function(st){
     html+='<div class="card">'+
       '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'+
-        avatarHtml(st.u,38,12)+
+        profileLink(st.id,avatarHtml(st.u,38,12))+
         '<div style="flex:1">'+
-          '<div style="font-size:14px;font-weight:700">'+esc(st.u.name)+'</div>'+
-          '<div style="font-size:11px;color:var(--text2)">'+st.myP.length+' portal(e) · '+st.done+'/'+st.total+' etapów · '+st.pct+'%'+(canSeeHours()?' · Łączny czas: '+fmtHours(st.hours)+' godz.':'')+'</div>'+
+          '<div style="font-size:14px;font-weight:700">'+profileLink(st.id,esc(st.u.name))+'</div>'+
+          '<div style="font-size:11px;color:var(--text2)">'+st.myP.length+' portal(e) · '+st.done+'/'+st.total+' etapów · '+st.pct+'%'+
+            (st.doneCount?' · ⏱️ średnio '+st.avgDays+' '+dniLabel(st.avgDays)+'/portal':'')+
+            (canSeeHours()?' · Łączny czas: '+fmtHours(st.hours)+' godz.':'')+'</div>'+
         '</div>'+
         '<div style="font-size:20px;font-weight:700;color:'+(st.pct>=70?'var(--success)':st.pct>=30?'var(--warning)':'var(--text3)')+'">'+st.pct+'%</div>'+
       '</div>'+
@@ -5787,6 +5893,7 @@ function compBlockHTML(p){
         '<div style="font-size:13px;font-weight:600">'+esc(p.name)+deadlineIcon(p)+'</div>'+
         '<div class="prog-bar" style="margin-top:3px;max-width:260px"><div class="prog-fill '+pfCls(pct)+'" style="width:'+pct+'%"></div></div>'+
       '</div>'+
+      portalDurationBadge(p,true)+ // v1.28: licznik dni trwania
       statusBadge(st)+
       '<span style="font-size:12px;font-weight:700;min-width:38px;text-align:right">'+pct+'%</span>'+
     '</div>'+
@@ -5906,6 +6013,44 @@ function portalCompletedDate(p){
   let max=null;
   p.stages.forEach(function(s){ if(s.dates.done&&(!max||s.dates.done>max))max=s.dates.done; });
   return max;
+}
+
+/* =========================================================================
+   v1.28 — CZAS TRWANIA PORTALU W DNIACH.
+   Godziny okazały się słabą miarą: trzeba je wpisywać ręcznie, więc bywają
+   niekompletne, a przy pracy nad kilkoma portalami naraz i tak nie mówią, jak
+   długo temat faktycznie „stał na biurku". Dni liczą się same, z dat, które i
+   tak powstają przy przechodzeniu etapów.
+   Start: p.createdAt, a gdy go nie ma (portale sprzed wprowadzenia tego pola) —
+   najwcześniejsza data z etapów. Koniec: data zamknięcia ostatniego etapu, a
+   dla portali w toku — dzisiaj.
+   ========================================================================= */
+function portalDurationDays(p){
+  const start=p.createdAt||firstStageDate(p);
+  if(!start) return null;
+  const done=portalCompletedDate(p);
+  const end=done||today();
+  if(end<start) return null; // zbite daty — lepiej nie pokazywać nic niż bzdurę
+  // +1, bo liczymy dni WŁĄCZNIE: portal założony i zamknięty tego samego dnia
+  // trwał jeden dzień, a nie zero.
+  return {days:daysBetweenStr(start,end)+1,done:!!done,start:start,end:end};
+}
+function dniLabel(n){ return n===1?'dzień':'dni'; }
+// Znacznik czasu trwania — zielony dla zamkniętych, bursztynowy dla trwających.
+function portalDurationBadge(p,small){
+  const d=portalDurationDays(p);
+  if(!d) return '';
+  const fs=small?'10px':'11px';
+  const pad=small?'2px 7px':'3px 9px';
+  const tt=d.done
+    ? 'Od '+fmtDayMon(d.start)+' do '+fmtDayMon(d.end)
+    : 'Trwa od '+fmtDayMon(d.start);
+  const styl=d.done
+    ? 'background:var(--success-bg);color:var(--success-text);border:1px solid var(--success)'
+    : 'background:var(--warning-bg);color:var(--warning-text);border:1px solid var(--warning)';
+  return '<span title="'+esc(tt)+'" style="display:inline-block;'+styl+';border-radius:20px;'+
+    'padding:'+pad+';font-size:'+fs+';font-weight:600;white-space:nowrap">'+
+    (d.done?'🏗️ Zbudowany w ':'⏳ W opracowaniu od ')+d.days+' '+dniLabel(d.days)+'</span>';
 }
 function currentYM(){ return today().slice(0,7); }
 // Polska odmiana: 1 etap ukończony / 2-4 etapy ukończone / 5+ etapów ukończonych
@@ -6218,10 +6363,17 @@ function renderStatsTeam(){
   stats.forEach(function(st){
     const probs=st.myP.reduce(function(a,p){return a+p.stages.filter(function(s){return s.status==='problem';}).length;},0);
     html+='<div class="portal-row" style="cursor:pointer" onclick="navTo(\'team\')">'+
-      avatarHtml(st.u,30,10)+
+      profileLink(st.id,avatarHtml(st.u,30,10))+
       '<div style="flex:1;min-width:0">'+
-        '<div style="font-size:13px;font-weight:600">'+esc(st.u.name)+'</div>'+
+        '<div style="font-size:13px;font-weight:600">'+profileLink(st.id,esc(st.u.name))+'</div>'+
         '<div style="font-size:11px;color:var(--text2)">'+esc(st.u.roleLabel)+' · '+st.myP.length+' portal(e) · '+st.done+'/'+st.total+' etapów'+(probs?' · ⚠️ '+probs+' problem'+(probs===1?'':'y'):'')+'</div>'+
+        // v1.28: tempo w dniach zamiast godzin — liczy się samo, z dat etapów.
+        '<div style="font-size:11px;color:var(--text3);margin-top:1px">'+
+          (st.doneCount
+            ? '⏱️ średnio <b>'+st.avgDays+' '+dniLabel(st.avgDays)+'</b> / portal (z '+st.doneCount+' zamkniętych)'
+            : '⏱️ brak zamkniętych portali — nie ma jeszcze z czego liczyć średniej')+
+          (st.totalDays?' · łącznie <b>'+st.totalDays+' '+dniLabel(st.totalDays)+'</b> prac':'')+
+        '</div>'+
       '</div>'+
       '<div class="prog-bar" style="width:90px"><div class="prog-fill '+pfCls(st.pct)+'" style="width:'+st.pct+'%"></div></div>'+
       '<span style="font-size:13px;font-weight:600;min-width:38px;text-align:right">'+st.pct+'%</span>'+
@@ -7149,6 +7301,11 @@ function renderGeoTeam(){
   const members=geoScopeMembers();
   let html=backButton()+'<h2 style="font-size:18px;font-weight:700;margin-bottom:4px">🛰️ Zespół Geoinformacyjny</h2>'+
     '<div style="font-size:12px;color:var(--text3);margin-bottom:10px">Obecności i nieobecności całego zespołu wg działów — widoczne tylko dla kierowników i administratora.</div>';
+  // v1.28: odnośnik do arkusza urlopów także tutaj (dotąd był wyłącznie w
+  // zakładce Nieobecności). Kierownik pracujący w tym widoku nie musi się już
+  // przełączać, żeby zajrzeć do źródła danych. Adres ustawia się w jednym
+  // miejscu — w Konfiguracji; tutaj jest tylko przycisk.
+  html+=urlopSheetLinkCardHTML();
   if(canImportGeo()){
     html+='<div class="card"><div class="section-hdr" style="margin-top:0">📥 Import z arkusza urlopów</div>'+
       '<div style="font-size:12px;color:var(--text2);margin-bottom:8px">Wgraj plik .xlsx (zakładka „'+URLOP_SHEET_NAME+'") — zaktualizuje nieobecności całego zespołu i zgłosi ewentualne zmiany osobowe.</div>'+
@@ -7793,7 +7950,165 @@ function openPortal(pid){
   portalDetailTab='stages';
   openStageId=null;
   kanbanReturn=false;
+  curProfileId=null; // wychodzimy z ewentualnego profilu
   document.getElementById('main-content').innerHTML=renderPortalDetail(pid);
+}
+
+/* =========================================================================
+   v1.28 — KARTY OSOBOWE (profile użytkowników).
+   Dotąd informacje o jednej osobie były rozsypane po całej aplikacji: portale
+   w liście zespołu, tempo w statystykach, nieobecności w kalendarzu, aktywność
+   w dzienniku. Żeby odpowiedzieć na proste pytanie „czym się teraz zajmuje
+   Michał i jak mu idzie", trzeba było obejść cztery widoki. Profil zbiera to
+   w jednym miejscu, dostępnym kliknięciem w nazwisko lub awatar.
+
+   Widoczność: koordynator widzi wszystkie profile zawsze. Dla reszty zespołu
+   decyduje przełącznik db.publicProfiles (Konfiguracja) — domyślnie WYŁĄCZONY,
+   bo profil pokazuje m.in. czyjeś tempo pracy i nieobecności, a to nie jest
+   oczywiste, że ma być jawne dla wszystkich. Własny profil widzi każdy zawsze.
+   ========================================================================= */
+let curProfileId=null;
+
+function publicProfilesEnabled(){ return db.publicProfiles===true; }
+function canSeeUserProfile(uid2){
+  if(!uid2) return false;
+  if(uid2===cu) return true;                 // własny profil zawsze
+  if(curUser().role==='koord') return true;  // koordynator widzi wszystkich
+  return publicProfilesEnabled();
+}
+function openUserProfile(uid2){
+  if(!getUsers()[uid2]){ toast('Nie znam takiego konta.'); return; }
+  if(!canSeeUserProfile(uid2)){
+    toast('🔒 Podgląd profili jest widoczny tylko dla koordynatora.');
+    return;
+  }
+  profileReturnView=curView||profileReturnView;
+  curProfileId=uid2;
+  mainContentIsPortalDetail=false;
+  document.getElementById('main-content').innerHTML=renderUserProfile(uid2);
+  window.scrollTo(0,0);
+}
+let profileReturnView='dashboard';
+function backFromProfile(){
+  curProfileId=null;
+  navTo(profileReturnView||'dashboard');
+}
+// Klikalne nazwisko/awatar — jeden helper, żeby nie powtarzać składni w
+// kilkunastu miejscach. Gdy podgląd jest niedostępny, nie udajemy odnośnika:
+// brak kursora i brak podkreślenia, żeby nikt nie klikał w martwy element.
+function profileLink(uid2,innerHtml,extraStyle){
+  const mozna=canSeeUserProfile(uid2);
+  if(!mozna) return '<span style="'+(extraStyle||'')+'">'+innerHtml+'</span>';
+  return '<span onclick="event.stopPropagation();openUserProfile(\''+uid2+'\')" '+
+    'title="Zobacz profil" style="cursor:pointer;'+(extraStyle||'')+'" '+
+    'onmouseover="this.style.textDecoration=\'underline\'" '+
+    'onmouseout="this.style.textDecoration=\'none\'">'+innerHtml+'</span>';
+}
+
+function renderUserProfile(uid2){
+  const u=getUsers()[uid2];
+  if(!u) return '<div class="card empty">Nie znaleziono tego konta.</div>';
+  if(!canSeeUserProfile(uid2)) return '<div class="card empty">🔒 Ten profil nie jest dla Ciebie dostępny.</div>';
+
+  const myP=db.portals.filter(function(p){return p.currentOwner===uid2;});
+  const wTrakcie=myP.filter(function(p){return portalPct(p)<100;});
+  const zamkniete=myP.filter(function(p){return portalPct(p)===100;});
+
+  // Etapy zamknięte przez tę osobę — liczymy po właścicielu etapu, a gdy go nie
+  // ma, po właścicielu portalu (tak samo jak reszta statystyk w aplikacji).
+  let etapyDone=0;
+  db.portals.forEach(function(p){
+    p.stages.forEach(function(s){
+      if(s.status==='done'&&(s.owner||p.currentOwner)===uid2) etapyDone++;
+    });
+  });
+
+  // Średni czas realizacji — tylko z portali zamkniętych, jak w teamStats.
+  let sumDni=0,cntDni=0;
+  myP.forEach(function(p){
+    const d=portalDurationDays(p);
+    if(d&&d.done){ sumDni+=d.days; cntDni++; }
+  });
+  const sredniaDni=cntDni?Math.round(sumDni/cntDni):0;
+
+  const online=isOnline(uid2);
+  const abs=absenceOnDay(uid2,today());
+  const at=abs?absenceType(abs.type):null;
+  const statusTxt=abs
+    ? (at?at.icon+' '+at.label:'Nieobecny(a)')
+    : (online?'🟢 Aktywny(a) teraz':'⚫ Offline');
+  const statusKolor=abs?'var(--warning-text)':(online?'var(--success-text)':'var(--text3)');
+
+  let html='<div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">'+
+    '<button class="btn btn-sm" onclick="backFromProfile()">← Wstecz</button>'+
+    '<div style="flex:1"></div>'+
+  '</div>';
+
+  // --- nagłówek karty ---
+  html+='<div class="card" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">'+
+    avatarHtml(u,64,22)+
+    '<div style="flex:1;min-width:200px">'+
+      '<div style="font-size:20px;font-weight:800">'+esc(u.name)+(uid2===cu?' <span style="font-size:12px;color:var(--text3);font-weight:400">(to Ty)</span>':'')+'</div>'+
+      '<div style="font-size:13px;color:var(--text2)">'+esc(u.roleLabel||u.role||'')+'</div>'+
+      '<div style="font-size:12px;color:'+statusKolor+';font-weight:600;margin-top:4px">'+esc(statusTxt)+
+        (!online&&!abs&&(db.presence||{})[uid2]&&db.presence[uid2].lastSeen
+          ? ' <span style="color:var(--text3);font-weight:400;font-style:italic">· ostatnio '+esc(fmtDateTime(db.presence[uid2].lastSeen))+'</span>'
+          : '')+
+      '</div>'+
+      (u.email?'<div style="font-size:12px;color:var(--text3);margin-top:2px">✉️ <a href="mailto:'+esc(u.email)+'" style="color:var(--accent)">'+esc(u.email)+'</a></div>':'')+
+    '</div>'+
+  '</div>';
+
+  // --- kafelki statystyk ---
+  function kafel(etykieta,wartosc,opis){
+    return '<div class="card" style="flex:1;min-width:150px;margin:0">'+
+      '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.04em">'+etykieta+'</div>'+
+      '<div style="font-size:24px;font-weight:800;margin:2px 0">'+wartosc+'</div>'+
+      '<div style="font-size:11px;color:var(--text3)">'+opis+'</div>'+
+    '</div>';
+  }
+  html+='<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">'+
+    kafel('Etapy zakończone',etapyDone,'w całej historii')+
+    kafel('Portale w toku',wTrakcie.length,zamkniete.length+' zamkniętych')+
+    kafel('Średnie tempo',(cntDni?sredniaDni+' '+dniLabel(sredniaDni):'—'),(cntDni?'na portal (z '+cntDni+')':'brak zamkniętych portali'))+
+  '</div>';
+
+  // --- portale ---
+  html+='<div class="card"><div class="section-hdr" style="margin-top:0">🗂️ Prowadzone portale ('+myP.length+')</div>';
+  if(!myP.length){
+    html+='<div style="font-size:12px;color:var(--text3)">Ta osoba nie prowadzi obecnie żadnego portalu.</div>';
+  } else {
+    const posort=myP.slice().sort(function(a,b){ return portalPct(a)-portalPct(b); });
+    html+=posort.map(function(p){
+      const pct=portalPct(p);
+      return '<div class="portal-row" style="cursor:pointer" onclick="openPortal(\''+p.id+'\')">'+
+        '<div style="flex:1;min-width:0">'+
+          '<div style="font-size:13px;font-weight:600">'+esc(p.name)+deadlineIcon(p)+'</div>'+
+          '<div style="font-size:11px;color:var(--text2)">'+esc(p.group||'')+(p.deadline?' · termin '+p.deadline:'')+'</div>'+
+        '</div>'+
+        portalDurationBadge(p,true)+
+        '<div class="prog-bar" style="width:90px"><div class="prog-fill '+pfCls(pct)+'" style="width:'+pct+'%"></div></div>'+
+        '<span style="font-size:12px;font-weight:700;min-width:38px;text-align:right">'+pct+'%</span>'+
+      '</div>';
+    }).join('');
+  }
+  html+='</div>';
+
+  // --- ostatnia aktywność ---
+  const log=(db.actionLog||[]).filter(function(a){return a.user===uid2;}).slice(0,10);
+  html+='<div class="card"><div class="section-hdr" style="margin-top:0">🕘 Ostatnia aktywność</div>';
+  if(!log.length){
+    html+='<div style="font-size:12px;color:var(--text3)">Brak zapisanych zdarzeń.</div>';
+  } else {
+    html+=log.map(function(a){
+      return '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">'+
+        '<span style="color:var(--text3);white-space:nowrap;min-width:110px">'+esc(fmtTs(a.ts))+'</span>'+
+        '<span style="flex:1">'+esc(a.text||a.action||'')+'</span>'+
+      '</div>';
+    }).join('');
+  }
+  html+='</div>';
+  return html;
 }
 function setPortalDetailTab(pid,tab){
   portalDetailTab=tab;
@@ -7857,7 +8172,10 @@ function renderPortalDetail(pid){
     '<button class="btn btn-sm" onclick="backFromPortal()">← Wstecz</button>'+
     '<div style="flex:1">'+
       '<div style="font-size:17px;font-weight:700">'+esc(p.name)+'</div>'+
-      '<div style="font-size:12px;color:var(--text2)">'+esc(p.group)+' · Termin: '+(p.deadline||'—')+'</div>'+
+      '<div style="font-size:12px;color:var(--text2);display:flex;align-items:center;gap:8px;flex-wrap:wrap">'+
+        '<span>'+esc(p.group)+' · Termin: '+(p.deadline||'—')+'</span>'+
+        portalDurationBadge(p)+ // v1.28: ile dni trwa/trwał ten portal
+      '</div>'+
     '</div>'+
     (role==='koord'?'<button class="btn btn-sm" onclick="openEditPortal(\''+pid+'\')">✎ Popraw</button>':'')+
     (role==='koord'?'<button class="btn btn-sm" style="border-color:var(--pro-text);color:var(--pro-text)" onclick="openTransfer(\''+pid+'\')">⇄ Przekaż</button>':'')+
@@ -9333,6 +9651,14 @@ function renderCfgUsers(){
     '</label>'+
   '</div>'+
   '<div class="card">'+
+    '<div class="section-hdr">👤 Karty osobowe zespołu</div>'+
+    '<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Kliknięcie w nazwisko lub awatar otwiera kartę osobową: prowadzone portale, tempo pracy, ostatnia aktywność i status obecności. Ty jako koordynator widzisz każdą kartę zawsze, a każdy widzi zawsze swoją własną. Ten przełącznik decyduje wyłącznie o tym, czy pracownicy mogą oglądać karty <b>pozostałych osób</b> — domyślnie nie mogą, bo karta pokazuje m.in. czyjeś tempo i nieobecności.</div>'+
+    '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">'+
+      '<input type="checkbox" style="width:auto" '+(publicProfilesEnabled()?'checked':'')+' onchange="togglePublicProfiles(this.checked)">'+
+      'Udostępnij karty osobowe całemu zespołowi'+
+    '</label>'+
+  '</div>'+
+  '<div class="card">'+
     '<div class="section-hdr">Powiadomienia email</div>'+
     '<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Gdy pracownik zgłosi problem na etapie lub poprosi o cofnięcie etapu, na ten adres wyśle się automatyczne powiadomienie email (przez Apps Script). To jest też domyślny adres, na który trafia cotygodniowy raport zbiorczy zespołu (Funkcja 11) — indywidualne raporty pracowników idą na ich własne adresy email ustawione w sekcji „Zarządzaj użytkownikami” poniżej.</div>'+
     '<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">'+
@@ -9849,6 +10175,13 @@ function prefillWelcomeMsgWithPinReset(){
   toast('Wypełniłem wiadomość powitalną — sprawdź treść i kliknij „Zapisz”.');
 }
 
+function togglePublicProfiles(checked){
+  db.publicProfiles=!!checked;
+  logAction('config_public_profiles',checked?'Udostępnił(a) karty osobowe całemu zespołowi':'Ograniczył(a) karty osobowe do koordynatora');
+  saveDB();
+  navTo('cfg-users');
+  toast(checked?'Karty osobowe widoczne dla całego zespołu.':'Karty osobowe tylko dla koordynatora (i własna dla każdego).');
+}
 function toggleFreeDateEdit(checked){
   db.freeDateEditEnabled=checked;
   logAction('config_date_edit_lock',checked?'Włączono swobodną edycję dat etapów dla wszystkich':'Zablokowano swobodną edycję dat etapów — tylko koordynator może je teraz poprawiać');
