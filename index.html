@@ -974,13 +974,21 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 
     <div class="field"><label>Co robimy z tym pomysłem?</label>
       <select id="ia-mode" onchange="onIdeaApproveModeChange()">
-        <option value="new">Nowa kompozycja w katalogu (trafi na giełdę zadań)</option>
+        <option value="new">Dodaj do ISTNIEJĄCEGO geoportalu — jako nowa kompozycja</option>
+        <option value="newgeo">Utwórz NOWY geoportal — wraz z pierwszą kompozycją</option>
         <option value="attach">Dołącz do istniejącego portalu jako uwaga</option>
       </select>
     </div>
 
+    <div id="ia-newgeo-box" style="display:none">
+      <div class="field"><label>Nazwa nowego geoportalu</label>
+        <input id="ia-geoname" placeholder="np. Geoportal Edukacyjny">
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:10px">Powstanie nowa kategoria w katalogu. Poniżej podaj jej pierwszą kompozycję.</div>
+    </div>
+
     <div id="ia-new-box">
-      <div class="field"><label>Geoportal / kategoria</label>
+      <div class="field" id="ia-category-field"><label>Geoportal / kategoria</label>
         <select id="ia-category"></select>
       </div>
       <div class="field"><label>Nazwa kompozycji</label>
@@ -1222,7 +1230,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent)}
 // Wersja aplikacji — widoczna w stopce ekranu logowania. Podbijaj przy każdym
 // wdrożeniu: zespół od razu widzi, czy ma świeżą wersję, a nie starą z cache
 // przeglądarki (przy problemach: Ctrl+Shift+R odświeża z pominięciem cache).
-const APP_VERSION = '1.31.2';
+const APP_VERSION = '1.32.0';
 
 /* =========================================================================
    v1.7 — powiadomienie "dostępna nowa wersja". Zasada: publikujesz nową
@@ -4249,25 +4257,51 @@ function renderOnlineWidget(){
         'display:flex;align-items:center;gap:6px')+
     '</div>';
   }
+  // v1.32: czas WZGLĘDNY zamiast daty z zegarkiem. „widziany 12 min temu" mówi
+  // od razu, czy ktoś jest pod ręką; „22.07.2026, 12:07" trzeba było w głowie
+  // odejmować od bieżącej godziny. Forma bezosobowa, bo w zespole są i kobiety,
+  // i mężczyźni.
+  function ostatnioWzglednie(id){
+    const p=(db.presence||{})[id];
+    if(!p||!p.lastSeen) return null;
+    const min=Math.floor((Date.now()-new Date(p.lastSeen).getTime())/60000);
+    if(min<1)  return 'przed chwilą';
+    if(min<60) return min+' min temu';
+    const godz=Math.floor(min/60);
+    if(godz<24) return godz+' godz. temu';
+    const dni=Math.floor(godz/24);
+    if(dni===1) return 'wczoraj';
+    if(dni<31)  return dni+' dni temu';
+    const mies=Math.floor(dni/30);
+    return mies===1?'ponad miesiąc temu':'ponad '+mies+' mies. temu';
+  }
+
   function pigulkaNieaktywny(e){
     const id=e[0],u=e[1];
-    const p=(db.presence||{})[id];
-    const kiedy=(p&&p.lastSeen)?fmtDateTime(p.lastSeen):null;
-    // Nieobecność ma pierwszeństwo przed „ostatnio widziany" — jeśli ktoś jest
-    // na urlopie, to jest właśnie ta informacja, której się szuka.
+    const kiedy=ostatnioWzglednie(id);
+    // Ktoś, kto nigdy się nie logował, to nie to samo co ktoś nieobecny od
+    // dawna — wcześniej jedno i drugie wyglądało tak samo.
+    const czasTxt=kiedy
+      ? '<span style="font-size:10px;font-style:italic">widziany '+esc(kiedy)+'</span>'
+      : '<span style="font-size:10px;font-style:italic;opacity:.8">jeszcze bez logowania</span>';
+
+    // Urlop NIE zastępuje już informacji o ostatniej obecności — pokazujemy
+    // oba, bo to dwie różne rzeczy: kiedy ostatnio pracował i kiedy wraca.
     const abs=absenceOnDay(id,today());
-    const at=abs?absenceType(abs.type):null;
-    const opis=abs
-      ? '<span style="font-size:10px;font-style:italic;color:var(--warning-text)">('+(at?at.icon+' '+esc(at.label):esc(abs.type))+')</span>'
-      // forma bezosobowa — w zespole są i kobiety, i mężczyźni, a „nie był
-      // zalogowany" wyświetlało się wszystkim jednakowo
-      : (kiedy?'<span style="font-size:10px;font-style:italic">(ostatnio: '+esc(kiedy)+')</span>':'<span style="font-size:10px;font-style:italic">(brak zapisanego logowania)</span>');
+    let urlopTxt='';
+    if(abs){
+      const at=absenceType(abs.type);
+      const wraca=absenceReturnStr(abs); // „wraca jutro" / „wraca za 3 dni" / „wraca po weekendzie"
+      urlopTxt='<span style="font-size:10px;font-style:italic;color:var(--warning-text);font-weight:600">'+
+        (at?at.icon+' '+esc(at.label):esc(abs.type))+(wraca?' · '+esc(wraca):'')+'</span>';
+    }
+
     return '<div style="display:flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--border);'+
-      'border-radius:20px;opacity:.65" title="'+esc(lastSeenText(id))+'">'+
-      '<span style="width:8px;height:8px;border-radius:50%;background:var(--border2);flex-shrink:0"></span>'+
+      'border-radius:20px;opacity:'+(abs?'.8':'.65')+'" title="'+esc(lastSeenText(id))+'">'+
+      '<span style="width:8px;height:8px;border-radius:50%;background:'+(abs?'var(--warning)':'var(--border2)')+';flex-shrink:0"></span>'+
       profileLink(id,avatarHtml(u,20,8)+'<span style="font-size:11.5px;color:var(--text3)">'+esc(u.name)+'</span>',
         'display:flex;align-items:center;gap:6px')+
-      opis+
+      czasTxt+urlopTxt+
     '</div>';
   }
 
@@ -4338,7 +4372,9 @@ function activeProblemsList(){
   // ukończonego, oraz zwykłe zapiski-problemy) też są PROBLEMAMI: pokazujemy je
   // w tej samej sekcji „problemy" na stronie głównej, a NIE na tablicy.
   (db.boardNotes||[]).forEach(function(n){
-    if(n.category!=='problem'||!canSeeBoardNote(n))return;
+    // v1.32: rozwiązane zgłoszenia znikają z listy aktywnych problemów, ale
+    // zostają w archiwum tablicy — nie kasujemy historii.
+    if(n.category!=='problem'||n.resolved||!canSeeBoardNote(n))return;
     const p=(n.link&&n.link.type==='portal')?(db.portals||[]).find(function(x){return x.id===n.link.pid;}):null;
     out.push({
       boardNote:n,
@@ -4362,10 +4398,18 @@ function problemAlertItemHTML(item){
   const title=item.stage
     ?('„'+esc(item.stage.name)+'” w „'+esc(item.portal.name)+'”')
     :(item.portal?('Portal „'+esc(item.portal.name)+'” — wymagana aktualizacja'):'Zgłoszenie zespołu');
+  // v1.32: zgłoszenia z tablicy da się zamknąć wprost z listy problemów —
+  // wcześniej trzeba było ich szukać na tablicy. Problemy ETAPÓW zamyka się
+  // zmianą statusu etapu, więc tam przycisku nie ma.
+  const zamknij=(item.boardNote&&canModerateBoardNote(item.boardNote))
+    ? '<button class="btn btn-xs" style="margin-top:5px;color:var(--success-text);border-color:var(--success)" '+
+      'onclick="event.stopPropagation();resolveBoardNote(\''+item.boardNote.id+'\')">✓ Rozwiązane</button>'
+    : '';
   return '<div style="padding:7px 0;border-top:1px solid rgba(0,0,0,.08);'+(click?'cursor:pointer':'')+'" '+click+'>'+
     '<div style="font-weight:600">'+title+(item.ownerId&&users[item.ownerId]?' · '+esc(ownerName):'')+'</div>'+
     (item.when?'<div style="font-size:11px;color:var(--text3);margin-top:2px">'+esc(item.when)+'</div>':'')+
     (item.text?'<div style="font-size:12px;margin-top:3px">'+esc(item.text)+'</div>':'')+
+    zamknij+
   '</div>';
 }
 function problemAlertBannerHTML(items,heading){
@@ -4420,8 +4464,84 @@ function canModerateBoardNote(n){
 }
 function visibleBoardNotes(){
   // v1.21 (#3): kategoria „Problem" trafia do sekcji PROBLEMY (nie na tablicę).
-  return (db.boardNotes||[]).filter(function(n){ return canSeeBoardNote(n) && n.category!=='problem'; }).slice()
+  // v1.32: zapiski ROZWIĄZANE schodzą do archiwum — nie zaśmiecają tablicy,
+  // ale nie znikają (patrz archivedBoardNotes).
+  return (db.boardNotes||[]).filter(function(n){ return canSeeBoardNote(n) && n.category!=='problem' && !n.resolved; }).slice()
     .sort(function(a,b){return a.ts<b.ts?1:(a.ts>b.ts?-1:0);});
+}
+/* =========================================================================
+   v1.32 — ARCHIWUM ZAPISKÓW I PROBLEMÓW.
+   Dotąd zapisek można było wyłącznie USUNĄĆ — bezpowrotnie. Więc albo zostawał
+   na tablicy na zawsze (i tablica rosła), albo znikał razem z całą historią:
+   kto zgłosił, czego dotyczyło, jak się skończyło. Przy zgłoszeniach problemów
+   to jest strata, bo dokładnie te informacje przydają się przy kolejnym
+   podobnym przypadku.
+   Teraz „Rozwiąż" oznacza wpis jako załatwiony, zapamiętuje kto i kiedy go
+   zamknął, i przenosi do archiwum. Usuwanie zostaje, ale schodzi na dalszy plan.
+   ========================================================================= */
+function archivedBoardNotes(){
+  return (db.boardNotes||[]).filter(function(n){ return canSeeBoardNote(n) && n.resolved; }).slice()
+    .sort(function(a,b){ const x=(a.resolved&&a.resolved.ts)||a.ts, y=(b.resolved&&b.resolved.ts)||b.ts;
+      return x<y?1:(x>y?-1:0); });
+}
+function resolveBoardNote(id){
+  const n=(db.boardNotes||[]).find(function(x){return x.id===id;});
+  if(!n||!canModerateBoardNote(n))return;
+  const jak=prompt('Jak to się zakończyło? (krótka notatka — zostanie w archiwum)','');
+  if(jak===null)return; // Anuluj
+  n.resolved={by:cu,ts:nowISO(),note:(jak||'').trim()};
+  logAction('board_resolve','Oznaczył(a) jako rozwiązane: „'+String(n.text||'').slice(0,60)+'”');
+  // Autor powinien wiedzieć, że jego zgłoszenie zostało zamknięte.
+  if(n.author&&n.author!==cu){
+    pushNotification(n.author,'board_resolved',
+      '✅ Twoje zgłoszenie zostało oznaczone jako rozwiązane'+(n.resolved.note?': '+n.resolved.note:'.'),
+      (n.link&&n.link.type==='portal')?n.link.pid:null,null);
+  }
+  saveDB();
+  _boardReRender();
+  toast('Oznaczono jako rozwiązane — wpis jest w archiwum.');
+}
+function unresolveBoardNote(id){
+  const n=(db.boardNotes||[]).find(function(x){return x.id===id;});
+  if(!n||!canModerateBoardNote(n))return;
+  delete n.resolved;
+  logAction('board_reopen','Przywrócił(a) zapisek z archiwum');
+  saveDB();
+  _boardReRender();
+  toast('Wpis wrócił na tablicę.');
+}
+let boardArchiveOpen=false;
+function toggleBoardArchive(){
+  boardArchiveOpen=!boardArchiveOpen;
+  _boardReRender();
+}
+// Sekcja archiwum — domyślnie zwinięta, żeby nie przytłaczała tablicy.
+function boardArchiveHTML(users){
+  const arch=archivedBoardNotes();
+  if(!arch.length) return '';
+  let html='<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:8px">'+
+    '<div style="font-size:11px;font-weight:700;color:var(--text3);cursor:pointer;user-select:none" onclick="toggleBoardArchive()">'+
+      (boardArchiveOpen?'▾':'▸')+' 🗄️ Archiwum — rozwiązane ('+arch.length+')'+
+    '</div>';
+  if(boardArchiveOpen){
+    html+='<div style="margin-top:8px">'+arch.map(function(n){
+      const kto=(users[(n.resolved||{}).by]||{}).name||'—';
+      const kiedy=(n.resolved&&n.resolved.ts)?fmtTs(n.resolved.ts):'';
+      return '<div style="font-size:11.5px;padding:7px 9px;margin-bottom:6px;border:1px solid var(--border);'+
+        'border-radius:var(--radius);background:var(--surface2);opacity:.85">'+
+        '<div style="text-decoration:line-through;color:var(--text3)">'+esc(String(n.text||''))+'</div>'+
+        '<div style="font-size:10px;color:var(--success-text);margin-top:3px">✅ rozwiązał(a): '+esc(kto)+' · '+esc(kiedy)+
+          ((n.resolved&&n.resolved.note)?' — '+esc(n.resolved.note):'')+'</div>'+
+        (canModerateBoardNote(n)
+          ? '<div style="margin-top:5px;display:flex;gap:5px">'+
+              '<button class="btn btn-xs" onclick="unresolveBoardNote(\''+n.id+'\')">↩ Przywróć na tablicę</button>'+
+              '<button class="btn btn-xs" style="color:var(--danger-text)" onclick="deleteBoardNote(\''+n.id+'\')">🗑️ Usuń trwale</button>'+
+            '</div>'
+          : '')+
+      '</div>';
+    }).join('')+'</div>';
+  }
+  return html+'</div>';
 }
 function boardHiddenForMe(){
   const u=getUsers()[cu]||{};
@@ -4443,6 +4563,7 @@ function renderBoardWidget(){
   } else {
     html+=notes.map(function(n){ return boardNoteHTML(n,users); }).join('');
   }
+  html+=boardArchiveHTML(users); // v1.32: zwijana sekcja rozwiązanych
   html+='</div>';
   return html;
 }
@@ -4465,8 +4586,12 @@ function boardNoteHTML(n,users){
       '<span style="font-size:10px;color:var(--text3)">'+ts+(n.editedAt?' · edyt.':'')+'</span>'+
       '<span class="board-scope-badge">'+boardScopeBadge(n.scope)+'</span>'+
       (canMod?'<span style="margin-left:auto;display:flex;gap:4px">'+
+        // v1.32: „Rozwiąż" przed „Usuń" — domyślną drogą zamykania sprawy ma
+        // być archiwizacja, nie kasowanie. Usuwanie zostaje dla wpisów
+        // pomyłkowych.
+        '<button class="btn btn-xs" style="color:var(--success-text);border-color:var(--success)" onclick="resolveBoardNote(\''+n.id+'\')" title="Oznacz jako rozwiązane — trafi do archiwum">✓ Rozwiąż</button>'+
         (mine?'<button class="btn btn-xs" onclick="editBoardNote(\''+n.id+'\')" title="Edytuj">✎</button>':'')+
-        '<button class="btn btn-xs btn-danger" onclick="deleteBoardNote(\''+n.id+'\')" title="Usuń">🗑️</button>'+
+        '<button class="btn btn-xs btn-danger" onclick="deleteBoardNote(\''+n.id+'\')" title="Usuń trwale — bez śladu w archiwum">🗑️</button>'+
       '</span>':'')+
     '</div>'+
     '<div style="font-size:13px;white-space:pre-wrap">'+esc(n.text)+'</div>'+
@@ -9727,6 +9852,7 @@ function approveIdea(iid){
 
   // domyślnie: nazwa kompozycji = nazwa pomysłu
   document.getElementById('ia-compname').value=idea.name||'';
+  document.getElementById('ia-geoname').value='';
   document.getElementById('ia-deadline').value='';
   document.getElementById('ia-note').value='';
   document.getElementById('ia-mode').value='new';
@@ -9735,7 +9861,12 @@ function approveIdea(iid){
 }
 function onIdeaApproveModeChange(){
   const tryb=document.getElementById('ia-mode').value;
-  document.getElementById('ia-new-box').style.display=(tryb==='new')?'':'none';
+  const nowyGeo=(tryb==='newgeo');
+  // Tryb „nowy geoportal" używa tego samego bloku (nazwa kompozycji + termin),
+  // tylko zamiast listy istniejących kategorii pokazuje pole na nazwę nowej.
+  document.getElementById('ia-newgeo-box').style.display=nowyGeo?'':'none';
+  document.getElementById('ia-new-box').style.display=(tryb==='new'||nowyGeo)?'':'none';
+  document.getElementById('ia-category-field').style.display=nowyGeo?'none':'';
   document.getElementById('ia-attach-box').style.display=(tryb==='attach')?'':'none';
 }
 
@@ -9746,14 +9877,20 @@ async function confirmIdeaApprove(){
   const note=document.getElementById('ia-note').value.trim();
   const autor=(getUsers()[idea.author]||{}).name||idea.author;
 
-  if(tryb==='new'){
-    const kategoria=document.getElementById('ia-category').value;
+  if(tryb==='new'||tryb==='newgeo'){
+    const nowyGeo=(tryb==='newgeo');
+    const kategoria=nowyGeo
+      ? document.getElementById('ia-geoname').value.trim()
+      : document.getElementById('ia-category').value;
     const nazwa=document.getElementById('ia-compname').value.trim();
     const termin=document.getElementById('ia-deadline').value;
-    if(!kategoria){ toast('Wybierz geoportal/kategorię.'); return; }
+    if(!kategoria){ toast(nowyGeo?'Podaj nazwę nowego geoportalu.':'Wybierz geoportal/kategorię.'); return; }
     if(!nazwa){ toast('Podaj nazwę kompozycji.'); return; }
 
     const katalog=getCatalog();
+    if(nowyGeo&&Object.prototype.hasOwnProperty.call(katalog,kategoria)){
+      if(!confirm('Geoportal „'+kategoria+'” już istnieje w katalogu.\n\nDopisać kompozycję do niego zamiast tworzyć nowy?')) return;
+    }
     if(!Array.isArray(katalog[kategoria])) katalog[kategoria]=[];
     if(katalog[kategoria].indexOf(nazwa)===-1) katalog[kategoria].push(nazwa);
     else toast('Taka kompozycja już była w katalogu — dopisuję samo zadanie.');
@@ -9765,15 +9902,20 @@ async function confirmIdeaApprove(){
 
     idea.status='approved';
     idea.koordNote=note;
-    idea.wdrozenie={typ:'new',kategoria:kategoria,nazwa:nazwa};
-    logAction('idea_approve','Zatwierdzono pomysł „'+idea.name+'” (od: '+autor+') → nowa kompozycja „'+nazwa+'” w „'+kategoria+'”');
+    idea.wdrozenie={typ:nowyGeo?'newgeo':'new',kategoria:kategoria,nazwa:nazwa};
+    logAction('idea_approve','Zatwierdzono pomysł „'+idea.name+'” (od: '+autor+') → '+
+      (nowyGeo?'NOWY geoportal „'+kategoria+'” z kompozycją „'+nazwa+'”':'nowa kompozycja „'+nazwa+'” w „'+kategoria+'”'));
     pushNotification(idea.author,'idea_approved',
-      '✅ Twój pomysł „'+idea.name+'” został zatwierdzony — trafił do katalogu jako „'+nazwa+'” ('+kategoria+') i czeka na giełdzie.',null,null);
+      '✅ Twój pomysł „'+idea.name+'” został zatwierdzony — '+
+      (nowyGeo?'powstał nowy geoportal „'+kategoria+'”':'trafił do katalogu jako „'+nazwa+'” ('+kategoria+')')+
+      ' i czeka na giełdzie.',null,null);
     saveDB();
     updateQueueBadge();
     closeModal('modal-idea-approve');
     navTo('queue');
-    toast('Pomysł wdrożony — kompozycja w katalogu, zadanie na giełdzie.');
+    toast(nowyGeo
+      ? 'Utworzono geoportal „'+kategoria+'” — zadanie czeka na giełdzie.'
+      : 'Pomysł wdrożony — kompozycja w katalogu, zadanie na giełdzie.');
     return;
   }
 
