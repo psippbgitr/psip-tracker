@@ -1262,7 +1262,7 @@ body.impersonating{box-shadow:inset 0 0 0 3px #5b3fa8}
 // Wersja aplikacji — widoczna w stopce ekranu logowania. Podbijaj przy każdym
 // wdrożeniu: zespół od razu widzi, czy ma świeżą wersję, a nie starą z cache
 // przeglądarki (przy problemach: Ctrl+Shift+R odświeża z pominięciem cache).
-const APP_VERSION = '1.36.0';
+const APP_VERSION = '1.36.1';
 
 /* =========================================================================
    v1.7 — powiadomienie "dostępna nowa wersja". Zasada: publikujesz nową
@@ -2101,7 +2101,7 @@ function dbConfigFingerprint(d){
   return (d.coordinatorEmail||'')+'|'+(d.freeDateEditEnabled===false?'0':'1')+'|'+usersPart+'|'+wmPart+
     '|'+JSON.stringify(d.holidayPrefs||{})+'|'+JSON.stringify(d.catalog||null)+
     '|'+(d.publicProfiles===true?'1':'0')+ // v1.28: żeby ciche odświeżenie nie cofało tego przełącznika
-    '|'+(d.worktimeEnabled===true?'1':'0'); // v1.36: to samo dla ewidencji czasu
+    '|'+(d.worktimeMode||(d.worktimeEnabled===true?'on':'off')); // v1.36: tryb ewidencji czasu
 }
 
 // v1.27 — dawne loadDB() zniknęło. Pobierało CAŁĄ bazę przy samym otwarciu
@@ -9064,23 +9064,37 @@ const WT_NORMA_MIN=480; // 8 godzin
    kadrowe, a ich zbieranie wymaga świadomej decyzji i poinformowania zespołu,
    nie „pojawienia się nowej zakładki po aktualizacji". Włącza się w
    Konfiguracji, jednym przełącznikiem. */
-function worktimeEnabled(){ return db.worktimeEnabled===true; }
-function canSeeWorktime(){
-  if(!worktimeEnabled()) return false;
-  const r=curUser().role;
-  return r==='koord'||r==='worker'; // przeglądający nie ewidencjonuje godzin
+// Trzy tryby zamiast włącz/wyłącz:
+//   'off'  — niewidoczne dla nikogo (domyślnie),
+//   'test' — widzi TYLKO koordynator, do sprawdzenia modułu przed pokazaniem
+//            zespołowi (o to prosił Łukasz — „włącz dla mnie, ukryj dla innych"),
+//   'on'   — widzi cały zespół.
+// (db.worktimeEnabled===true z wcześniejszej wersji traktujemy jak 'on'.)
+function worktimeMode(){
+  if(db.worktimeMode==='test'||db.worktimeMode==='on'||db.worktimeMode==='off') return db.worktimeMode;
+  return db.worktimeEnabled===true?'on':'off';
 }
-function toggleWorktime(checked){
-  db.worktimeEnabled=!!checked;
-  logAction('config_worktime',checked
-    ? 'Włączył(a) moduł ewidencji czasu pracy'
-    : 'Wyłączył(a) moduł ewidencji czasu pracy');
+function canSeeWorktime(){
+  const m=worktimeMode();
+  if(m==='off') return false;
+  const r=curUser().role;
+  if(m==='test') return r==='koord';           // tryb próbny — tylko koordynator
+  return r==='koord'||r==='worker';             // 'on' — cały zespół (bez przeglądających)
+}
+function setWorktimeMode(mode){
+  db.worktimeMode=mode;
+  delete db.worktimeEnabled; // porządkujemy starą flagę
+  const opis={off:'Wyłączył(a) moduł ewidencji czasu',
+    test:'Włączył(a) ewidencję czasu w trybie próbnym (tylko koordynator)',
+    on:'Udostępnił(a) ewidencję czasu całemu zespołowi'}[mode]||'Zmienił(a) tryb ewidencji czasu';
+  logAction('config_worktime',opis);
   saveDB();
   renderSidebar();
   navTo('cfg-users');
-  toast(checked
-    ? 'Ewidencja czasu włączona — zakładka pojawi się u wszystkich.'
-    : 'Ewidencja czasu wyłączona i ukryta. Zapisane godziny zostają w bazie.');
+  const t={off:'Ewidencja czasu wyłączona i ukryta. Zapisane godziny zostają w bazie.',
+    test:'Ewidencja czasu w trybie próbnym — widzisz ją tylko Ty. Zespół nadal jej nie widzi.',
+    on:'Ewidencja czasu włączona — zakładka pojawi się u całego zespołu.'}[mode];
+  if(t) toast(t);
 }
 
 function workSchedules(){ if(!db.workSchedules) db.workSchedules={}; return db.workSchedules; }
@@ -11021,11 +11035,22 @@ function renderCfgUsers(){
   '</div>'+
   '<div class="card">'+
     '<div class="section-hdr">⏱️ Ewidencja czasu pracy</div>'+
-    '<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Moduł do wpisywania godzin wejścia i wyjścia, z miesięcznym bilansem i eksportem do Excela. Każdy widzi swoje godziny, Ty — całego zespołu. Aplikacja <b>podpowiada</b> godziny na podstawie aktywności w Trackerze, ale ich nie mierzy: przeglądarka nie ma dostępu do godziny włączenia komputera.<br><br><b>Zanim włączysz:</b> ewidencja czasu pracy to dane kadrowe. Uprzedź zespół, po co ją zbieracie i kto ma do niej wgląd — a jeśli miałaby służyć rozliczaniu godzin, uzgodnij to wcześniej z kadrami. Dopóki przełącznik jest wyłączony, zakładka jest niewidoczna dla wszystkich, łącznie z Tobą.</div>'+
-    '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">'+
-      '<input type="checkbox" style="width:auto" '+(worktimeEnabled()?'checked':'')+' onchange="toggleWorktime(this.checked)">'+
-      'Włącz moduł ewidencji czasu dla zespołu'+
-    '</label>'+
+    '<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Moduł do wpisywania godzin wejścia i wyjścia, z miesięcznym bilansem i eksportem do Excela. Każdy widzi swoje godziny, Ty — całego zespołu. Aplikacja <b>podpowiada</b> godziny na podstawie aktywności w Trackerze, ale ich nie mierzy: przeglądarka nie ma dostępu do godziny włączenia komputera.<br><br><b>Zanim udostępnisz zespołowi:</b> ewidencja czasu pracy to dane kadrowe. Uprzedź zespół, po co ją zbieracie i kto ma do niej wgląd — a jeśli miałaby służyć rozliczaniu godzin, uzgodnij to wcześniej z kadrami.</div>'+
+    (function(){
+      const m=worktimeMode();
+      function opcja(tryb,tytul,podpis){
+        const akt=(m===tryb);
+        return '<label style="display:flex;gap:9px;align-items:flex-start;padding:9px 11px;margin-bottom:6px;'+
+          'border:1px solid '+(akt?'var(--accent)':'var(--border)')+';border-radius:var(--radius);cursor:pointer;'+
+          (akt?'background:var(--accent-bg)':'')+'">'+
+          '<input type="radio" name="wt-mode" style="width:auto;margin-top:2px" '+(akt?'checked':'')+' onchange="setWorktimeMode(\''+tryb+'\')">'+
+          '<span><b style="font-size:13px">'+tytul+'</b><br><span style="font-size:11px;color:var(--text3)">'+podpis+'</span></span>'+
+        '</label>';
+      }
+      return opcja('off','Wyłączona','Niewidoczna dla nikogo — także dla Ciebie.')+
+             opcja('test','Tryb próbny — tylko dla Ciebie','Zakładkę widzisz wyłącznie Ty (koordynator). Zespół nadal jej nie widzi — do przetestowania przed udostępnieniem.')+
+             opcja('on','Włączona dla całego zespołu','Zakładka pojawia się u wszystkich pracowników.');
+    })()+
   '</div>'+
   '<div class="card">'+
     '<div class="section-hdr">👤 Karty osobowe zespołu</div>'+
