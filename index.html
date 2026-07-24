@@ -635,6 +635,12 @@ body.impersonating{box-shadow:inset 0 0 0 3px #5b3fa8}
           <div class="field"><label>PIN</label>
             <input type="password" id="ls-pin" placeholder="••••" maxlength="10" onkeydown="onLoginPinKeydown(event)">
           </div>
+          <!-- v1.36: domyślnie ODZNACZONE — na komputerze dzielonym z innymi
+               bezpieczniejszy wariant ma się wybierać sam. -->
+          <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text2);margin-bottom:10px;cursor:pointer">
+            <input type="checkbox" id="ls-remember" style="width:auto;margin:0">
+            <span>Zapamiętaj mnie na tym urządzeniu <span style="color:var(--text3)">(bez PIN-u przez 30 dni)</span></span>
+          </label>
           <div id="ls-err" style="font-size:11px;color:#E24B4A;margin-bottom:8px;display:none">Nieprawidłowy PIN</div>
           <div class="login-btn-wrap">
             <button class="btn btn-primary" id="ls-login-btn" style="opacity:0.6" onclick="doLogin()" disabled>Zaloguj się</button>
@@ -1256,7 +1262,7 @@ body.impersonating{box-shadow:inset 0 0 0 3px #5b3fa8}
 // Wersja aplikacji — widoczna w stopce ekranu logowania. Podbijaj przy każdym
 // wdrożeniu: zespół od razu widzi, czy ma świeżą wersję, a nie starą z cache
 // przeglądarki (przy problemach: Ctrl+Shift+R odświeża z pominięciem cache).
-const APP_VERSION = '1.34.0';
+const APP_VERSION = '1.36.0';
 
 /* =========================================================================
    v1.7 — powiadomienie "dostępna nowa wersja". Zasada: publikujesz nową
@@ -1834,16 +1840,40 @@ const PENDING_WRITE_KEY='psip_pending_write';
    ------------------------------------------------------------------------- */
 const AUTH_TOKEN_KEY='psip_auth_token';
 const AUTH_USER_KEY='psip_auth_user';
-function authToken(){ try{ return localStorage.getItem(AUTH_TOKEN_KEY)||null; }catch(e){ return null; } }
-function authUserId(){ try{ return localStorage.getItem(AUTH_USER_KEY)||null; }catch(e){ return null; } }
-function setAuthToken(token,userId){
+/* v1.36 — „Zapamiętaj mnie" ma być WYBOREM, nie regułą.
+   Do tej pory token zawsze lądował w localStorage, czyli aplikacja wpuszczała
+   bez PIN-u każdego, kto otworzył ją na tym komputerze — także tygodnie
+   później i także kogoś innego. Na komputerze służbowym stojącym w pokoju
+   dzielonym z kilkoma osobami to jest zła wartość domyślna.
+
+   Teraz decyduje ptaszek na ekranie logowania:
+     zaznaczony  → localStorage: token przeżywa zamknięcie przeglądarki (30 dni),
+     odznaczony  → sessionStorage: token ginie razem z zamknięciem przeglądarki,
+                   więc następnym razem trzeba podać PIN.
+   Domyślnie ODZNACZONY — bezpieczniejszy wariant wybiera się sam, a kto chce
+   wygody, świadomie ją włącza. */
+function authToken(){
+  try{ return sessionStorage.getItem(AUTH_TOKEN_KEY)||localStorage.getItem(AUTH_TOKEN_KEY)||null; }catch(e){ return null; }
+}
+function authUserId(){
+  try{ return sessionStorage.getItem(AUTH_USER_KEY)||localStorage.getItem(AUTH_USER_KEY)||null; }catch(e){ return null; }
+}
+// remember === undefined oznacza ODNOWIENIE tokenu w tle: zostawiamy go tam,
+// gdzie już był, żeby przedłużenie sesji nie zmieniało cichcem decyzji człowieka.
+function setAuthToken(token,userId,remember){
   try{
-    if(token) localStorage.setItem(AUTH_TOKEN_KEY,token);
-    if(userId) localStorage.setItem(AUTH_USER_KEY,userId);
+    if(remember===undefined) remember=(localStorage.getItem(AUTH_TOKEN_KEY)!==null);
+    const gdzie=remember?localStorage:sessionStorage;
+    const drugie=remember?sessionStorage:localStorage;
+    if(token){ gdzie.setItem(AUTH_TOKEN_KEY,token); drugie.removeItem(AUTH_TOKEN_KEY); }
+    if(userId){ gdzie.setItem(AUTH_USER_KEY,userId); drugie.removeItem(AUTH_USER_KEY); }
   }catch(e){}
 }
 function clearAuthToken(){
-  try{ localStorage.removeItem(AUTH_TOKEN_KEY); localStorage.removeItem(AUTH_USER_KEY); }catch(e){}
+  try{
+    localStorage.removeItem(AUTH_TOKEN_KEY); localStorage.removeItem(AUTH_USER_KEY);
+    sessionStorage.removeItem(AUTH_TOKEN_KEY); sessionStorage.removeItem(AUTH_USER_KEY);
+  }catch(e){}
 }
 // Odnowiony token przychodzi „przy okazji" dowolnej odpowiedzi — zgarniamy go
 // zawsze, żeby sesja przedłużała się sama, dopóki ktoś korzysta z aplikacji.
@@ -2070,7 +2100,8 @@ function dbConfigFingerprint(d){
   const wmPart=wm?(wm.updatedAt||'')+'|'+(wm.seenBy||[]).length:'';
   return (d.coordinatorEmail||'')+'|'+(d.freeDateEditEnabled===false?'0':'1')+'|'+usersPart+'|'+wmPart+
     '|'+JSON.stringify(d.holidayPrefs||{})+'|'+JSON.stringify(d.catalog||null)+
-    '|'+(d.publicProfiles===true?'1':'0'); // v1.28: żeby ciche odświeżenie nie cofało tego przełącznika
+    '|'+(d.publicProfiles===true?'1':'0')+ // v1.28: żeby ciche odświeżenie nie cofało tego przełącznika
+    '|'+(d.worktimeEnabled===true?'1':'0'); // v1.36: to samo dla ewidencji czasu
 }
 
 // v1.27 — dawne loadDB() zniknęło. Pobierało CAŁĄ bazę przy samym otwarciu
@@ -2852,9 +2883,10 @@ async function apiPost(body,timeoutMs){
   }
 }
 
-async function apiLogin(userId,pin){
+async function apiLogin(userId,pin,remember){
   const r=await apiPost({action:'login',userId:userId,pin:pin},WRITE_TIMEOUT_MS);
-  if(r&&r.ok&&r.token) setAuthToken(r.token,userId);
+  // remember decyduje, czy token przeżyje zamknięcie przeglądarki — patrz setAuthToken.
+  if(r&&r.ok&&r.token) setAuthToken(r.token,userId,!!remember);
   return r;
 }
 
@@ -3035,6 +3067,10 @@ async function restoreSession(){
 function enterApp(uid2,offline){
   // czysty start — gdyby poprzednia sesja skończyła się w trybie podglądu
   realCu=null; impRoleOnly=null; impersonating=false;
+  // v1.36: ewidencja czasu też startuje od zera. Bez tego wybór „czyje godziny
+  // oglądam" przeżywał wylogowanie i następna osoba przy tej samej przeglądarce
+  // widziała na wejściu cudzy miesiąc.
+  wtOsoba=null; wtMiesiac=null;
   cu=uid2;
   const usr=getUsers()[cu];
   logLogin(cu,!!offline);
@@ -3084,7 +3120,8 @@ async function doLogin(){
   btn.disabled=true;btn.textContent='Logowanie...';
   showLoginStatus('connecting');
 
-  const res=await apiLogin(u,p);
+  const zapamietaj=!!(document.getElementById('ls-remember')||{}).checked;
+  const res=await apiLogin(u,p,zapamietaj);
   btn.textContent=prevLabel;
   btn.disabled=true; // odblokujemy dopiero po całej sekwencji powitania
 
@@ -3431,8 +3468,19 @@ function logout(){
   // v1.27: wylogowanie kończy sesję także po stronie tego urządzenia — bez tego
   // token leżałby dalej w localStorage i następne otwarcie strony wpuściłoby
   // z powrotem bez pytania o PIN.
+  // v1.36: jeśli sesja NIE była zapamiętana („to nie jest mój komputer"), to po
+  // wylogowaniu nie zostawiamy na nim także kopii danych roboczych. Wyjątek:
+  // gdy czekają niedosłane zmiany — wtedy kopia jest jedynym miejscem, gdzie
+  // istnieją, i skasowanie jej byłoby utratą czyjejś pracy.
+  let bylaZapamietana=false;
+  try{ bylaZapamietana=(localStorage.getItem(AUTH_TOKEN_KEY)!==null); }catch(e){}
+  if(!bylaZapamietana&&!hasPendingWrite()){
+    try{ localStorage.removeItem(LOCAL_BACKUP_KEY); }catch(e){}
+  }
   clearAuthToken();
   _authLostShown=false;
+  // v1.36: nie zostawiamy następnej osobie cudzego widoku ewidencji ani profilu
+  wtOsoba=null; wtMiesiac=null; curProfileId=null;
   cu=null;curView=null;curPortalId=null;mainContentIsPortalDetail=false;
   document.getElementById('s-app').classList.remove('active');
   document.getElementById('s-login').classList.add('active');
@@ -3508,6 +3556,10 @@ function renderSidebar(){
   let html='';
   if(role==='koord'){
     html+='<div class="nav-group">Moje zadania</div>'+
+    // v1.35: własna karta osobowa dla KAŻDEGO — dotąd profil dało się otworzyć
+    // tylko klikając cudze nazwisko, więc pracownik bez prawa do cudzych profili
+    // nie miał jak zobaczyć nawet swojego.
+    navItem('my-profile','users','Mój profil',{onclick:"openUserProfile(cu)"})+
     navItem('my-portals','map','Moje portale')+
     '<div class="nav-group">Zarządzanie</div>'+
     navItem('dashboard','grid','Przegląd zespołu')+
@@ -3517,6 +3569,7 @@ function renderSidebar(){
     navItem('calendar','calendar','Kalendarz')+
     navItem('gantt','barChart','Harmonogram')+
     (canSeeAbsencesTab()?navItem('absences','calendar','Nieobecności'):'')+
+    (canSeeWorktime()?navItem('worktime','clock','Ewidencja czasu'):'')+ // v1.36
     navItem('team','users','Zespół')+
     (canSeeGeoTeam()?navItem('geoteam','users','Zespół Geoinformacyjny'):'')+
     navItem('stats','barChart','Statystyki')+
@@ -3533,6 +3586,7 @@ function renderSidebar(){
     navItem('cfg-users','gear','Konfiguracja');
   } else if(role==='viewer'){
     html+='<div class="nav-group">Podgląd</div>'+
+    navItem('my-profile','users','Mój profil',{onclick:"openUserProfile(cu)"})+
     navItem('dashboard','grid','Przegląd')+
     navItem('portals-all','map','Portale')+
     navItem('this-week','calendarWeek','Ten tydzień')+
@@ -3550,8 +3604,13 @@ function renderSidebar(){
     navItem('cfg-users','gear','Konfiguracja');
   } else {
     html+='<div class="nav-group">Moje zadania</div>'+
+    // v1.35: własna karta osobowa dla KAŻDEGO — dotąd profil dało się otworzyć
+    // tylko klikając cudze nazwisko, więc pracownik bez prawa do cudzych profili
+    // nie miał jak zobaczyć nawet swojego.
+    navItem('my-profile','users','Mój profil',{onclick:"openUserProfile(cu)"})+
     navItem('my-portals','map','Moje portale')+
     navItem('this-week','calendarWeek','Ten tydzień')+
+    (canSeeWorktime()?navItem('worktime','clock','Ewidencja czasu'):'')+
     (canSeeAbsencesTab()?navItem('absences','calendar','Nieobecności'):'')+
     (freeDateEditEnabled()?navItem('bulk-dates','calendarEdit','Korekta dat etapów'):'')+
     navItem('queue','list','Giełda zadań')+
@@ -3614,6 +3673,7 @@ function navTo(view){
   else if(view==='calendar') main.innerHTML=renderCalendar();
   else if(view==='gantt') main.innerHTML=renderGantt();
   else if(view==='absences') main.innerHTML=renderAbsences();
+  else if(view==='worktime') main.innerHTML=renderWorkTime(); // v1.36
   else if(view==='bulk-dates') main.innerHTML=renderBulkDates();
   else if(view==='chat') main.innerHTML=renderChat();
   else if(view==='features') main.innerHTML=renderFeatureRequests();
@@ -8809,6 +8869,14 @@ function openUserProfile(uid2){
   curProfileId=uid2;
   mainContentIsPortalDetail=false;
   document.getElementById('main-content').innerHTML=renderUserProfile(uid2);
+  // v1.35: podświetlenie pozycji „Mój profil" w menu — openUserProfile nie idzie
+  // przez navTo(), więc musi zadbać o to samodzielnie.
+  document.querySelectorAll('.nav-item').forEach(function(n){n.classList.remove('active');});
+  if(uid2===cu){
+    const mp=document.querySelector('.nav-item[data-view="my-profile"]');
+    if(mp) mp.classList.add('active');
+  }
+  closeSidebar(); // na telefonie: schowaj menu po wybraniu pozycji
   window.scrollTo(0,0);
 }
 let profileReturnView='dashboard';
@@ -8918,19 +8986,391 @@ function renderUserProfile(uid2){
   html+='</div>';
 
   // --- ostatnia aktywność ---
-  const log=(db.actionLog||[]).filter(function(a){return a.user===uid2;}).slice(0,10);
+  // v1.35 POPRAWKA: było `a.text`, a logAction zapisuje opis w polu `summary`.
+  // Skutek: zamiast „Zapisano czas pracy — etap …" widać było surowy kod
+  // zdarzenia („stage_hours"), czyli coś, co nikomu nic nie mówi.
+  const log=(db.actionLog||[]).filter(function(a){return a.user===uid2;}).slice(0,12);
   html+='<div class="card"><div class="section-hdr" style="margin-top:0">🕘 Ostatnia aktywność</div>';
   if(!log.length){
     html+='<div style="font-size:12px;color:var(--text3)">Brak zapisanych zdarzeń.</div>';
   } else {
     html+=log.map(function(a){
-      return '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">'+
-        '<span style="color:var(--text3);white-space:nowrap;min-width:110px">'+esc(fmtTs(a.ts))+'</span>'+
-        '<span style="flex:1">'+esc(a.text||a.action||'')+'</span>'+
+      const opis=a.summary||a.text||akcjaLabel(a.action);
+      return '<div style="display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:12px;align-items:flex-start">'+
+        '<span style="color:var(--text3);white-space:nowrap;min-width:104px;font-size:11px">'+esc(fmtTs(a.ts))+'</span>'+
+        '<span style="flex:1;line-height:1.45">'+esc(opis)+'</span>'+
       '</div>';
     }).join('');
   }
   html+='</div>';
+  return html;
+}
+
+// Zapasowy, czytelny opis zdarzenia — dla starych wpisów, które powstały zanim
+// dana akcja zaczęła zapisywać własny opis. Lepsze to niż surowy kod.
+const AKCJA_LABEL={
+  stage_hours:'Zapisał(a) czas pracy przy etapie',
+  stage_date_edit:'Poprawił(a) datę etapu',
+  stage_date_bulk_edit:'Hurtowa korekta dat etapów',
+  stage_done:'Zakończył(a) etap',
+  stage_problem:'Zgłosił(a) problem na etapie',
+  unlock_request:'Poprosił(a) o cofnięcie etapu',
+  portal_add:'Dodał(a) portal',
+  portal_edit:'Poprawił(a) dane portalu',
+  portal_del:'Usunął(-ęła) portal',
+  portal_remark:'Dodał(a) uwagę do portalu',
+  portal_transfer:'Przekazał(a) portal',
+  assigned:'Przydzielił(a) portal',
+  idea_approve:'Zatwierdził(a) pomysł',
+  idea_reject:'Odrzucił(a) pomysł',
+  board_add:'Dodał(a) zapisek na tablicy',
+  board_resolve:'Oznaczył(a) zapisek jako rozwiązany',
+  board_del:'Usunął(-ęła) zapisek',
+  pin_change_own:'Zmienił(a) własny PIN',
+  pin_reset:'Zresetował(a) PIN',
+  user_add:'Dodał(a) użytkownika',
+  user_edit:'Edytował(a) użytkownika',
+  geo_import:'Zaimportował(a) nieobecności',
+  gantt_deadline:'Zmienił(a) termin w harmonogramie',
+  gantt_start:'Zmienił(a) start w harmonogramie',
+  gantt_stage:'Zmienił(a) czas etapu w harmonogramie'
+};
+function akcjaLabel(kod){ return AKCJA_LABEL[kod]||('Zdarzenie: '+(kod||'—')); }
+
+/* =========================================================================
+   v1.36 — EWIDENCJA CZASU I ODPRACOWAŃ
+
+   Struktura: db.workSchedules = { userId: { 'RRRR-MM-DD': {start,end,note} } }
+
+   Skąd biorą się godziny: aplikacja PODPOWIADA je z własnych danych (pierwsze
+   logowanie danego dnia i ostatnia zapisana czynność), a człowiek poprawia.
+   Świadomie NIE traktujemy tego jako pomiaru — aplikacja w przeglądarce nie ma
+   dostępu do czasu włączenia komputera, więc podpowiedź mówi tylko tyle, kiedy
+   ktoś korzystał z Trackera. Kto rano pracuje w QGIS-ie, będzie miał zaniżony
+   start i musi go poprawić. Podpowiedź jest zawsze oznaczona jako propozycja,
+   dopóki nikt jej nie zatwierdzi.
+
+   Bilans: przepracowane − wymiar. Wymiar liczymy tylko za dni robocze, w
+   których dana osoba NIE była nieobecna — urlop i L4 obniżają wymiar, więc
+   tydzień urlopu nie robi z nikogo dłużnika.
+
+   Nadgodziny i odpracowania nie mają osobnego mechanizmu: dzień przepracowany
+   dłużej daje dodatni bilans dnia, krótszy — ujemny, a miesiąc to ich suma.
+   ========================================================================= */
+const WT_NORMA_MIN=480; // 8 godzin
+
+/* Moduł jest DOMYŚLNIE WYŁĄCZONY i niewidoczny dla nikogo — także dla
+   koordynatora. Powód nie jest techniczny: ewidencja czasu pracy to dane
+   kadrowe, a ich zbieranie wymaga świadomej decyzji i poinformowania zespołu,
+   nie „pojawienia się nowej zakładki po aktualizacji". Włącza się w
+   Konfiguracji, jednym przełącznikiem. */
+function worktimeEnabled(){ return db.worktimeEnabled===true; }
+function canSeeWorktime(){
+  if(!worktimeEnabled()) return false;
+  const r=curUser().role;
+  return r==='koord'||r==='worker'; // przeglądający nie ewidencjonuje godzin
+}
+function toggleWorktime(checked){
+  db.worktimeEnabled=!!checked;
+  logAction('config_worktime',checked
+    ? 'Włączył(a) moduł ewidencji czasu pracy'
+    : 'Wyłączył(a) moduł ewidencji czasu pracy');
+  saveDB();
+  renderSidebar();
+  navTo('cfg-users');
+  toast(checked
+    ? 'Ewidencja czasu włączona — zakładka pojawi się u wszystkich.'
+    : 'Ewidencja czasu wyłączona i ukryta. Zapisane godziny zostają w bazie.');
+}
+
+function workSchedules(){ if(!db.workSchedules) db.workSchedules={}; return db.workSchedules; }
+function wtWpis(userId,dateStr){ return (workSchedules()[userId]||{})[dateStr]||null; }
+function wtMinuty(hhmm){
+  if(!hhmm||typeof hhmm!=='string'||hhmm.indexOf(':')===-1) return null;
+  const cz=hhmm.split(':'), g=parseInt(cz[0],10), m=parseInt(cz[1],10);
+  if(isNaN(g)||isNaN(m)) return null;
+  return g*60+m;
+}
+function wtFmtMin(min){
+  if(min===null||min===undefined||isNaN(min)) return '—';
+  const znak=min<0?'−':'';
+  const a=Math.abs(Math.round(min));
+  return znak+Math.floor(a/60)+' godz. '+String(a%60).padStart(2,'0')+' min';
+}
+function wtFmtKrotko(min){
+  if(min===null||min===undefined||isNaN(min)) return '—';
+  const znak=min<0?'−':(min>0?'+':'');
+  const a=Math.abs(Math.round(min));
+  return znak+Math.floor(a/60)+':'+String(a%60).padStart(2,'0');
+}
+// Ile realnie przepracowano danego dnia (null = brak wpisu).
+function wtPrzepracowaneDnia(userId,dateStr){
+  const w=wtWpis(userId,dateStr);
+  if(!w) return null;
+  const s=wtMinuty(w.start), e=wtMinuty(w.end);
+  if(s===null||e===null) return null;
+  return Math.max(0,e-s);
+}
+// Wymiar dnia: 0 dla weekendów, świąt i dni nieobecności tej osoby.
+function wtWymiarDnia(userId,dateStr){
+  if(isFreeDayStr(dateStr)) return 0;
+  const abs=absenceOnDay(userId,dateStr);
+  if(abs&&absenceBlocks(abs)) return 0; // urlop/L4/opieka — nie ma czego odpracowywać
+  return WT_NORMA_MIN;
+}
+function wtBilansDnia(userId,dateStr){
+  const p=wtPrzepracowaneDnia(userId,dateStr);
+  if(p===null) return null;
+  return p-wtWymiarDnia(userId,dateStr);
+}
+
+// PODPOWIEDŹ z aktywności w aplikacji: pierwsze logowanie / pierwsza czynność
+// tego dnia oraz ostatnia czynność. Zwraca null, gdy tego dnia nie było śladu.
+function wtSugestia(userId,dateStr){
+  let min=null,max=null;
+  function uwzglednij(ts){
+    if(!ts||String(ts).slice(0,10)!==dateStr) return;
+    const t=new Date(ts).getTime();
+    if(isNaN(t))return;
+    if(min===null||t<min)min=t;
+    if(max===null||t>max)max=t;
+  }
+  (db.loginLog||[]).forEach(function(l){ if(l.user===userId) uwzglednij(l.ts); });
+  (db.actionLog||[]).forEach(function(a){ if(a.user===userId) uwzglednij(a.ts); });
+  const pr=(db.presence||{})[userId];
+  if(pr&&pr.lastSeen) uwzglednij(pr.lastSeen);
+  if(min===null) return null;
+  function hhmm(t){ const d=new Date(t); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
+  return {start:hhmm(min),end:hhmm(max===min?min:max)};
+}
+
+function wtDniMiesiaca(ym){
+  const pierwszy=ym+'-01', ostatni=lastDayOfMonth(pierwszy);
+  const out=[]; let d=pierwszy;
+  while(d<=ostatni){ out.push(d); d=addDaysStr(d,1); }
+  return out;
+}
+// Podsumowanie miesiąca jednej osoby.
+function wtPodsumowanie(userId,ym){
+  let wymiar=0,przepracowane=0,dniZWpisem=0,dniBezWpisu=0,dniNieobecne=0;
+  const dzis=today();
+  wtDniMiesiaca(ym).forEach(function(d){
+    const wym=wtWymiarDnia(userId,d);
+    if(wym===0){ if(!isFreeDayStr(d)) dniNieobecne++; return; }
+    wymiar+=wym;
+    const p=wtPrzepracowaneDnia(userId,d);
+    if(p===null){ if(d<=dzis) dniBezWpisu++; }
+    else { przepracowane+=p; dniZWpisem++; }
+  });
+  return {wymiar:wymiar,przepracowane:przepracowane,bilans:przepracowane-wymiar,
+    dniZWpisem:dniZWpisem,dniBezWpisu:dniBezWpisu,dniNieobecne:dniNieobecne};
+}
+
+let wtMiesiac=null;            // 'RRRR-MM'
+let wtOsoba=null;              // czyj widok ogląda koordynator
+function wtInit(){ if(!wtMiesiac) wtMiesiac=currentYM(); if(!wtOsoba) wtOsoba=cu; }
+function wtZmienMiesiac(krok){
+  wtInit();
+  const d=parseYMD(wtMiesiac+'-01');
+  d.setUTCMonth(d.getUTCMonth()+krok);
+  wtMiesiac=ymdUTC(d).slice(0,7);
+  navTo('worktime');
+}
+function wtWybierzOsobe(uid2){ wtOsoba=uid2; navTo('worktime'); }
+
+// Zapis jednego dnia. Wpis pustych godzin = usunięcie dnia z ewidencji.
+function wtZapiszDzien(userId,dateStr){
+  if(userId!==cu&&curUser().role!=='koord'){ toast('Możesz edytować tylko własne godziny.'); return; }
+  const s=(document.getElementById('wt-s-'+dateStr)||{}).value||'';
+  const e=(document.getElementById('wt-e-'+dateStr)||{}).value||'';
+  const n=((document.getElementById('wt-n-'+dateStr)||{}).value||'').trim();
+  const sch=workSchedules();
+  if(!sch[userId]) sch[userId]={};
+  if(!s&&!e){
+    delete sch[userId][dateStr];
+    logAction('worktime_del','Usunął(a) wpis czasu pracy z '+dateStr);
+  } else {
+    const sm=wtMinuty(s), em=wtMinuty(e);
+    if(sm===null||em===null){ toast('Podaj obie godziny — od i do.'); return; }
+    if(em<sm){ toast('Godzina zakończenia jest wcześniejsza niż rozpoczęcia.'); return; }
+    sch[userId][dateStr]={start:s,end:e,note:n};
+    logAction('worktime_set','Zapisał(a) czas pracy '+dateStr+': '+s+'–'+e+' ('+wtFmtMin(em-sm)+')');
+  }
+  saveDB();
+  navTo('worktime');
+}
+// Wstawia podpowiedź do pól — NIE zapisuje. Człowiek musi ją zatwierdzić.
+function wtWstawSugestie(userId,dateStr){
+  const sug=wtSugestia(userId,dateStr);
+  if(!sug){ toast('Brak śladu aktywności w aplikacji tego dnia.'); return; }
+  const si=document.getElementById('wt-s-'+dateStr), ei=document.getElementById('wt-e-'+dateStr);
+  if(si) si.value=sug.start;
+  if(ei) ei.value=sug.end;
+  toast('Wstawiono propozycję '+sug.start+'–'+sug.end+' — popraw i zapisz.');
+}
+
+function wtCsvMiesiaca(){
+  wtInit();
+  const users=getUsers();
+  const osoby=Object.keys(users).filter(function(id){return users[id]&&users[id].active!==false;})
+    .sort(function(a,b){return String(users[a].name).localeCompare(String(users[b].name),'pl');});
+  const wiersze=[['Pracownik','Miesiąc','Wymiar (godz.)','Przepracowane (godz.)','Bilans (godz.)','Dni z wpisem','Dni bez wpisu','Dni nieobecności']];
+  osoby.forEach(function(id){
+    const p=wtPodsumowanie(id,wtMiesiac);
+    wiersze.push([users[id].name,wtMiesiac,(p.wymiar/60).toFixed(2),(p.przepracowane/60).toFixed(2),
+      (p.bilans/60).toFixed(2),p.dniZWpisem,p.dniBezWpisu,p.dniNieobecne]);
+  });
+  // średnik + BOM, żeby Excel w polskiej wersji otworzył to poprawnie
+  const csv='﻿'+wiersze.map(function(r){
+    return r.map(function(c){ return '"'+String(c).replace(/"/g,'""')+'"'; }).join(';');
+  }).join('\r\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  a.download='ewidencja_czasu_'+wtMiesiac+'.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  toast('Pobrano zestawienie za '+wtMiesiac+'.');
+}
+
+function renderWorkTime(){
+  // Zabezpieczenie na wypadek wejścia z pominięciem menu (np. stary odnośnik).
+  if(!canSeeWorktime()){
+    return backButton()+'<div class="card empty">Moduł ewidencji czasu jest wyłączony.'+
+      (curUser().role==='koord'?' Możesz go włączyć w Konfiguracji.':'')+'</div>';
+  }
+  wtInit();
+  const role=curUser().role;
+  const isKoord=(role==='koord');
+  const users=getUsers();
+  // Pracownik ogląda wyłącznie siebie — nawet przy ręcznej podmianie wtOsoba.
+  const uid2=isKoord?(wtOsoba||cu):cu;
+  const u=users[uid2]||{};
+  const dzis=today();
+  const p=wtPodsumowanie(uid2,wtMiesiac);
+
+  const [rok,mies]=wtMiesiac.split('-');
+  let html=backButton()+'<h2 style="font-size:18px;font-weight:700;margin-bottom:6px">⏱️ Ewidencja czasu i odpracowań</h2>'+
+    '<div style="font-size:12px;color:var(--text3);margin-bottom:12px">'+
+      'Godziny wpisujesz sam — aplikacja tylko <b>podpowiada</b> je na podstawie Twojej aktywności w Trackerze '+
+      '(pierwsze wejście i ostatnia czynność danego dnia). To nie jest pomiar czasu przy komputerze: '+
+      'przeglądarka nie ma dostępu do godziny jego włączenia. Dni wolne, święta i nieobecności obniżają wymiar, '+
+      'więc urlop nie robi z nikogo dłużnika.</div>';
+
+  // pasek miesiąca + wybór osoby dla koordynatora
+  html+='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">'+
+    '<button class="btn btn-sm" onclick="wtZmienMiesiac(-1)">← Poprzedni</button>'+
+    '<div style="font-size:14px;font-weight:700;min-width:150px;text-align:center">'+MONTH_PL[parseInt(mies,10)-1]+' '+rok+'</div>'+
+    '<button class="btn btn-sm" onclick="wtZmienMiesiac(1)">Następny →</button>';
+  if(isKoord){
+    const osoby=Object.keys(users).filter(function(id){return users[id]&&users[id].active!==false;})
+      .sort(function(a,b){return String(users[a].name).localeCompare(String(users[b].name),'pl');});
+    html+='<div style="flex:1"></div>'+
+      '<select onchange="wtWybierzOsobe(this.value)" style="font-size:12px;padding:4px 6px">'+
+        osoby.map(function(id){ return '<option value="'+id+'"'+(id===uid2?' selected':'')+'>'+esc(users[id].name)+(id===cu?' (Ty)':'')+'</option>'; }).join('')+
+      '</select>'+
+      '<button class="btn btn-sm" onclick="wtCsvMiesiaca()" title="Zestawienie całego zespołu za ten miesiąc">⬇ CSV zespołu</button>';
+  }
+  html+='</div>';
+
+  // --- podsumowanie miesiąca ---
+  const kolorB=p.bilans>=0?'var(--success-text)':'var(--danger-text)';
+  function kafel(et,wa,op,kolor){
+    return '<div class="card" style="flex:1;min-width:140px;margin:0">'+
+      '<div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.04em">'+et+'</div>'+
+      '<div style="font-size:20px;font-weight:800;margin:2px 0'+(kolor?';color:'+kolor:'')+'">'+wa+'</div>'+
+      '<div style="font-size:11px;color:var(--text3)">'+op+'</div></div>';
+  }
+  html+='<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">'+
+    kafel('Wymiar',Math.round(p.wymiar/60)+' godz.','dni robocze bez nieobecności')+
+    kafel('Przepracowane',Math.round(p.przepracowane/60)+' godz.',p.dniZWpisem+' dni z wpisem')+
+    kafel('Bilans',wtFmtKrotko(p.bilans),p.bilans>=0?'nadgodziny':'do odpracowania',kolorB)+
+  '</div>';
+  if(p.dniBezWpisu){
+    html+='<div class="card" style="border-left:3px solid var(--warning);background:var(--warning-bg);padding:9px 12px;margin-bottom:12px">'+
+      '<span style="font-size:12px;color:var(--warning-text)">⚠️ Dni robocze bez wpisanych godzin: <b>'+p.dniBezWpisu+'</b>. '+
+      'Liczą się do wymiaru, więc zaniżają bilans, dopóki ich nie uzupełnisz.</span></div>';
+  }
+
+  // --- tabela dni ---
+  const mojeDane=(uid2===cu);
+  const mozeEdytowac=mojeDane||isKoord;
+  html+='<div class="card" style="overflow-x:auto"><div class="section-hdr" style="margin-top:0">'+
+    esc(u.name||uid2)+' — '+MONTH_PL[parseInt(mies,10)-1]+' '+rok+'</div>'+
+    '<table style="width:100%;border-collapse:collapse;font-size:12px">'+
+    '<thead><tr>'+['Dzień','Od','Do','Przepracowane','Bilans','Notatka',''].map(function(h){
+      return '<th style="text-align:left;padding:5px 6px;border-bottom:2px solid var(--border2);white-space:nowrap;font-size:11px">'+h+'</th>';
+    }).join('')+'</tr></thead><tbody>';
+
+  wtDniMiesiaca(wtMiesiac).forEach(function(dstr){
+    const wolny=isFreeDayStr(dstr);
+    const abs=absenceOnDay(uid2,dstr);
+    const at=abs?absenceType(abs.type):null;
+    const w=wtWpis(uid2,dstr);
+    const prac=wtPrzepracowaneDnia(uid2,dstr);
+    const bil=wtBilansDnia(uid2,dstr);
+    const przyszly=(dstr>dzis);
+    const tlo=(dstr===dzis)?'background:var(--accent-bg);':(wolny?'background:var(--surface2);':'');
+    const blokada=(wolny||(abs&&absenceBlocks(abs)));
+
+    let opisDnia='<b>'+dayLabel(dstr)+'</b>';
+    if(abs) opisDnia+=' <span style="font-size:10px;color:var(--warning-text)">'+(at?at.icon+' '+esc(at.label):esc(abs.type))+'</span>';
+    else if(wolny) opisDnia+=' <span style="font-size:10px;color:var(--text3)">wolne</span>';
+
+    html+='<tr style="'+tlo+'">'+
+      '<td style="padding:4px 6px;border-bottom:1px solid var(--border);white-space:nowrap">'+opisDnia+'</td>';
+    if(blokada){
+      html+='<td colspan="4" style="padding:4px 6px;border-bottom:1px solid var(--border);color:var(--text3);font-style:italic">'+
+        (abs?'nieobecność — wymiar 0':'dzień wolny')+'</td>'+
+        '<td style="border-bottom:1px solid var(--border)"></td><td style="border-bottom:1px solid var(--border)"></td>';
+    } else {
+      html+='<td style="padding:3px 6px;border-bottom:1px solid var(--border)">'+
+          '<input type="time" id="wt-s-'+dstr+'" value="'+(w?esc(w.start):'')+'" '+(mozeEdytowac?'':'disabled')+' style="font-size:12px;padding:2px 4px;width:92px"></td>'+
+        '<td style="padding:3px 6px;border-bottom:1px solid var(--border)">'+
+          '<input type="time" id="wt-e-'+dstr+'" value="'+(w?esc(w.end):'')+'" '+(mozeEdytowac?'':'disabled')+' style="font-size:12px;padding:2px 4px;width:92px"></td>'+
+        '<td style="padding:4px 6px;border-bottom:1px solid var(--border);white-space:nowrap">'+(prac===null?'<span style="color:var(--text3)">—</span>':wtFmtMin(prac))+'</td>'+
+        '<td style="padding:4px 6px;border-bottom:1px solid var(--border);white-space:nowrap;font-weight:700;color:'+
+          (bil===null?'var(--text3)':(bil>=0?'var(--success-text)':'var(--danger-text)'))+'">'+(bil===null?'—':wtFmtKrotko(bil))+'</td>'+
+        '<td style="padding:3px 6px;border-bottom:1px solid var(--border)">'+
+          '<input type="text" id="wt-n-'+dstr+'" value="'+(w&&w.note?esc(w.note):'')+'" placeholder="np. wyjście do lekarza, odpracuję w czwartek" '+
+          (mozeEdytowac?'':'disabled')+' style="font-size:11px;padding:2px 5px;width:100%;min-width:150px"></td>'+
+        '<td style="padding:3px 6px;border-bottom:1px solid var(--border);white-space:nowrap">'+
+          (mozeEdytowac
+            ? (!przyszly&&wtSugestia(uid2,dstr)?'<button class="btn btn-xs" onclick="wtWstawSugestie(\''+uid2+'\',\''+dstr+'\')" title="Wstaw propozycję z aktywności w aplikacji">💡</button> ':'')+
+              '<button class="btn btn-xs" onclick="wtZapiszDzien(\''+uid2+'\',\''+dstr+'\')">Zapisz</button>'
+            : '')+
+        '</td>';
+    }
+    html+='</tr>';
+  });
+  html+='</tbody></table></div>';
+
+  // --- karta bilansu całego zespołu (koordynator) ---
+  if(isKoord){
+    const osoby=Object.keys(users).filter(function(id){return users[id]&&users[id].active!==false;})
+      .sort(function(a,b){return String(users[a].name).localeCompare(String(users[b].name),'pl');});
+    html+='<div class="card" style="overflow-x:auto"><div class="section-hdr" style="margin-top:0">📋 Bilans zespołu — '+MONTH_PL[parseInt(mies,10)-1]+' '+rok+'</div>'+
+      '<table style="width:100%;border-collapse:collapse;font-size:12px">'+
+      '<thead><tr>'+['Pracownik','Wymiar','Przepracowane','Bilans','Braki wpisów',''].map(function(h){
+        return '<th style="text-align:left;padding:5px 6px;border-bottom:2px solid var(--border2);white-space:nowrap;font-size:11px">'+h+'</th>';
+      }).join('')+'</tr></thead><tbody>'+
+      osoby.map(function(id){
+        const s=wtPodsumowanie(id,wtMiesiac);
+        const kol=s.bilans>=0?'var(--success-text)':'var(--danger-text)';
+        return '<tr'+(id===uid2?' style="background:var(--accent-bg)"':'')+'>'+
+          '<td style="padding:5px 6px;border-bottom:1px solid var(--border)">'+esc(users[id].name)+'</td>'+
+          '<td style="padding:5px 6px;border-bottom:1px solid var(--border);white-space:nowrap">'+Math.round(s.wymiar/60)+' godz.</td>'+
+          '<td style="padding:5px 6px;border-bottom:1px solid var(--border);white-space:nowrap">'+Math.round(s.przepracowane/60)+' godz.</td>'+
+          '<td style="padding:5px 6px;border-bottom:1px solid var(--border);white-space:nowrap;font-weight:700;color:'+kol+'">'+
+            wtFmtKrotko(s.bilans)+(s.bilans<0?' ⚠️':'')+'</td>'+
+          '<td style="padding:5px 6px;border-bottom:1px solid var(--border)">'+(s.dniBezWpisu?s.dniBezWpisu+' dni':'—')+'</td>'+
+          '<td style="padding:5px 6px;border-bottom:1px solid var(--border)">'+
+            '<button class="btn btn-xs" onclick="wtWybierzOsobe(\''+id+'\')">Pokaż</button></td>'+
+        '</tr>';
+      }).join('')+
+      '</tbody></table>'+
+      '<div style="font-size:11px;color:var(--text3);margin-top:8px">Ujemny bilans oznacza godziny do odpracowania. '+
+      'Dni robocze bez wpisu liczą się do wymiaru — zanim wyciągniesz wnioski, sprawdź, czy ktoś po prostu nie uzupełnił godzin.</div>'+
+    '</div>';
+  }
   return html;
 }
 function setPortalDetailTab(pid,tab){
@@ -10577,6 +11017,14 @@ function renderCfgUsers(){
     '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">'+
       '<input type="checkbox" style="width:auto" '+(freeDateEditEnabled()?'checked':'')+' onchange="toggleFreeDateEdit(this.checked)">'+
       'Zezwól wszystkim na swobodną edycję dat etapów (bez zatwierdzania)'+
+    '</label>'+
+  '</div>'+
+  '<div class="card">'+
+    '<div class="section-hdr">⏱️ Ewidencja czasu pracy</div>'+
+    '<div style="font-size:12px;color:var(--text2);margin-bottom:10px">Moduł do wpisywania godzin wejścia i wyjścia, z miesięcznym bilansem i eksportem do Excela. Każdy widzi swoje godziny, Ty — całego zespołu. Aplikacja <b>podpowiada</b> godziny na podstawie aktywności w Trackerze, ale ich nie mierzy: przeglądarka nie ma dostępu do godziny włączenia komputera.<br><br><b>Zanim włączysz:</b> ewidencja czasu pracy to dane kadrowe. Uprzedź zespół, po co ją zbieracie i kto ma do niej wgląd — a jeśli miałaby służyć rozliczaniu godzin, uzgodnij to wcześniej z kadrami. Dopóki przełącznik jest wyłączony, zakładka jest niewidoczna dla wszystkich, łącznie z Tobą.</div>'+
+    '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">'+
+      '<input type="checkbox" style="width:auto" '+(worktimeEnabled()?'checked':'')+' onchange="toggleWorktime(this.checked)">'+
+      'Włącz moduł ewidencji czasu dla zespołu'+
     '</label>'+
   '</div>'+
   '<div class="card">'+
